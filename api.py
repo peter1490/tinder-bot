@@ -106,6 +106,15 @@ def delete_person(group_id, person_id):
 
     return request
 
+def get_person(group_id, person_id):
+    url = 'https://bill.cognitiveservices.azure.com/face/v1.0/persongroups/'+ group_id + '/persons/' + person_id
+
+    header = {'Ocp-Apim-Subscription-Key' : api_key}
+
+    request = requests.get(url, headers = header)
+
+    return request
+
 def add_person_face(group_id, person_id, picture_link):
 
     url = 'https://bill.cognitiveservices.azure.com/face/v1.0/persongroups/'+ group_id + '/persons/' + person_id + '/persistedFaces'
@@ -143,10 +152,11 @@ def list_persons(group_id):
 
     return request
 
-#print(delete_person_group('mygroupid').status_code)
-#print(create_person_group('mygroupid').text)
+#print(delete_person_group('main_model').status_code)
+#print(create_person_group('main_model').text)
 #print(create_person('mygroupid', 'ref_0').text)
-#print(delete_person('mygroupid', '7150b650-40b0-4dc5-9c60-77ca4eb40e11').text)
+#print(delete_person('main_model', '5b703a0e-6a2b-454c-bf80-599182d504ab').status_code)
 #print(add_person_face('mygroupid', '7150b650-40b0-4dc5-9c60-77ca4eb40e11', 'img/model/ref_0.jpg').text)
 #print(list_groups().text)
-#print(list_persons('mygroupid').text)
+#print(json.dumps(list_persons('main_model').json(), indent=4))
+#print(get_group_training_status("main_model").text)
