@@ -9,16 +9,16 @@ user32.SetProcessDPIAware()
 screen_width = user32.GetSystemMetrics(0)
 screen_height = user32.GetSystemMetrics(1)
 
-def capture_picture(picture_width, picture_height, picture_name):
-    im2 = ImageGrab.grab(bbox =(screen_width/2 - picture_width/2, screen_height/2 - picture_height/2, screen_width/2 + picture_width/2,  screen_height/2 + picture_height/2)) 
-    im2.save("img/training_models/" + picture_name + ".jpg")
+def capture_picture(picture_width, picture_height, picture_folder, picture_name):
+    im2 = ImageGrab.grab(bbox =(screen_width/2 - picture_width/2+230, screen_height/2 - picture_height/2 - 50, screen_width/2 + picture_width/2+230,  screen_height/2 + picture_height/2 - 50)) 
+    im2.save(picture_folder +"/"+ picture_name +".jpg")
 
 def train_ai(pictures_folder, group_id):
     pictures_added = 0
-    picturesInFolder  = os.listdir(pictures_folder)
+    pictures_in_folder  = os.listdir(pictures_folder)
     response = create_person_group(group_id)
     if response.status_code == 200 or response.json()["error"]["code"] == "PersonGroupExists":
-        for picture in picturesInFolder:
+        for picture in pictures_in_folder:
             picture_name_extension = picture.split('.')
             picture_path = pictures_folder +'/'+ picture_name_extension[0]+'.'+picture_name_extension[1]
             response = get_person(group_id, picture_name_extension[0])
@@ -51,4 +51,31 @@ def train_ai(pictures_folder, group_id):
         print("Could not create groupId : " + group_id)
         print("Http response: " + response.text)
 
-train_ai("img/model_pics", "main_model")
+def add_new_pictures_to_model(pictures_to_add, pictures_folder, group_id):
+    response = list_persons(group_id)
+    if response.status_code == 200:
+        persons = response.json()
+        for person in persons:
+            ref_num = int(person["name"][4:])
+            for person_2 in persons:
+                ref_person_2 = int(person_2["name"][4:])
+                if ref_num < ref_person_2:
+                    ref_num = ref_person_2
+        
+        pictures_in_folder_to_add  = os.listdir(pictures_to_add)
+        for picture_to_add in pictures_in_folder_to_add:
+            ref_num += 1
+            picture_to_add_name_extension = picture_to_add.split(".")
+            os.rename(pictures_to_add+"/"+picture_to_add_name_extension[0]+"."+picture_to_add_name_extension[1], pictures_folder+"/ref_"+str(ref_num)+"."+picture_to_add_name_extension[1])
+            print(pictures_folder+"/ref_"+str(ref_num)+"."+picture_to_add_name_extension[1]+" Added !")
+    else:
+        print("Could not load groupId: " + group_id)
+        print("Http response Code: " + response.text)
+
+    
+
+#train_ai("img/model_pics", "main_model")
+
+#add_new_pictures_to_model("img/pre_model", "img/model_pics", "main_model")
+
+#capture_picture(450, 600, "img/models_test", "test")

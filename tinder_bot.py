@@ -95,4 +95,4 @@ def countdown_timer(x, now=datetime.datetime.now):
 
 bot = TinderBot()
 bot.login()
-bot.auto_swipe()
+#bot.auto_swipe()

@@ -152,11 +152,33 @@ def list_persons(group_id):
 
     return request
 
+def identify_person_from_model(group_id, face_id):
+    url = "https://bill.cognitiveservices.azure.com/face/v1.0/identify"
+
+    header = {'Content-Type': 'application/json', 'Ocp-Apim-Subscription-Key' : api_key}
+
+    json_data = {
+        'personGroupId' : group_id,
+        'faceIds' : [
+            face_id
+        ],
+        'maxNumOfCandidatesReturned' : 1,
+        'confidenceThreshold' : 0.5
+    }
+
+    json_data = json.dumps(json_data)
+
+    request = requests.post(url, headers = header,  data = json_data)
+
+    return request
+
 #print(delete_person_group('main_model').status_code)
-#print(create_person_group('main_model').text)
+#print(create_person_group('main_model').status_code)
 #print(create_person('mygroupid', 'ref_0').text)
 #print(delete_person('main_model', '5b703a0e-6a2b-454c-bf80-599182d504ab').status_code)
 #print(add_person_face('mygroupid', '7150b650-40b0-4dc5-9c60-77ca4eb40e11', 'img/model/ref_0.jpg').text)
 #print(list_groups().text)
 #print(json.dumps(list_persons('main_model').json(), indent=4))
 #print(get_group_training_status("main_model").text)
+print(identify_person_from_model('main_model', "ff47061b-1ded-43fc-bede-0ced16b94952").text)
+#print(json.dumps(list_persons('main_model').json(), indent=4))
