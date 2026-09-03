@@ -89,6 +89,6 @@ class ClipEngine:
             if "attention_mask" in self._t_inputs:
                 feeds["attention_mask"] = mask
             out = self.text.run([self._t_out], feeds)[0]
-            for t, v in zip(todo, l2norm(out.astype(np.float32))):
+            for t, v in zip(todo, l2norm(out.astype(np.float32)), strict=True):
                 self._text_cache[t] = v
         return np.stack([self._text_cache[t] for t in texts])

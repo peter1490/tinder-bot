@@ -77,7 +77,7 @@ def decode_scrfd(outputs: list[np.ndarray], height: int, width: int, det_thresh:
     bboxes = sorted([o for o in outputs if o.shape[-1] == 4], key=lambda o: -o.shape[0])
     kpss = sorted([o for o in outputs if o.shape[-1] == 10], key=lambda o: -o.shape[0])
     all_scores, all_boxes, all_kps = [], [], []
-    for stride, sc, bb, kp in zip(strides, scores, bboxes, kpss):
+    for stride, sc, bb, kp in zip(strides, scores, bboxes, kpss, strict=False):
         sc = sc.reshape(-1)
         fh, fw = height // stride, width // stride
         ys, xs = np.mgrid[:fh, :fw]
@@ -182,7 +182,7 @@ class FaceEngine:
         if not faces:
             return []
         crops = [align_face(bgr, f.kps, self.recognizer.size) for f in faces]
-        for f, e in zip(faces, self.recognizer.embed_batch(crops)):
+        for f, e in zip(faces, self.recognizer.embed_batch(crops), strict=True):
             f.embedding = e
         return faces
 

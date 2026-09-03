@@ -211,11 +211,14 @@ class Storage:
     def count_decisions(self, since_ts: float | None = None, action: str | None = None, source: str | None = None) -> int:
         q, args = "SELECT COUNT(*) FROM decisions WHERE 1=1", []
         if since_ts is not None:
-            q += " AND ts>=?"; args.append(since_ts)
+            q += " AND ts>=?"
+            args.append(since_ts)
         if action:
-            q += " AND action=?"; args.append(action)
+            q += " AND action=?"
+            args.append(action)
         if source:
-            q += " AND source=?"; args.append(source)
+            q += " AND source=?"
+            args.append(source)
         return int(self.conn.execute(q, args).fetchone()[0])
 
     def uncertain_for_review(self, limit: int = 50) -> list[sqlite3.Row]:

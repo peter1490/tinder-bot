@@ -8,6 +8,7 @@ window, records the event and slows down for the rest of the day so it stops bei
 
 from __future__ import annotations
 
+import contextlib
 import random
 import sys
 import time
@@ -92,10 +93,8 @@ class CaptchaPolicy:
             notify("tinderbot stopped", f"Account notice on screen: {challenge.detail}", self.cfg)
             return "stop"
         notify("tinderbot needs you", "Tinder is showing a human-verification challenge. Solve it in the browser window.", self.cfg)
-        try:
+        with contextlib.suppress(Exception):
             page.bring_to_front()
-        except Exception:
-            pass
         deadline = time.time() + self.cfg.wait_for_human_max_minutes * 60
         while time.time() < deadline:
             sleep(3)
