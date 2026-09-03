@@ -1,0 +1,70 @@
+<!doctype html>
+<html>
+<head>
+<title>mock tinder recs</title>
+<style>
+  body { margin: 0; font-family: sans-serif; }
+  #card { width: 400px; height: 600px; margin: 40px auto; position: relative; }
+  .photo { width: 400px; height: 500px; background-size: cover; }
+  .gamepad { display: flex; gap: 20px; justify-content: center; margin-top: 12px; }
+  .gamepad button { width: 64px; height: 64px; border-radius: 50%; }
+  .Hidden { position: absolute; left: -9999px; }
+  #dialog { position: fixed; top: 100px; left: 100px; background: #eee; padding: 20px; display: none; }
+  #captcha { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <div id="card" data-card="1">
+    <div class="photo" style="background-image: url(&quot;https://images-ssl.gotinder.com/u/aaa/640x800.jpg?x=1&quot;)"></div>
+    <h1><span itemprop="name">Ana</span> <span itemprop="age">25</span></h1>
+    <div class="gamepad">
+      <button aria-label="Nope" id="nope"><span class="Hidden">Nope</span>X</button>
+      <button aria-label="Like" id="like"><span class="Hidden">Like</span>&hearts;</button>
+    </div>
+  </div>
+  <div id="dialog" role="dialog">
+    <p>Get Tinder Gold to see who likes you</p>
+    <button id="buy">Get Gold</button>
+    <button id="nothanks">No Thanks</button>
+  </div>
+  <div id="captcha">
+    <p>Let's make sure you're a real person</p>
+    <iframe src="about:blank" data-src="https://tinder-api.arkoselabs.com/fc/gc/?token=x"></iframe>
+  </div>
+</main>
+<script>
+  window.actions = [];
+  const cards = [
+    {name: 'Ana', age: 25, url: 'https://images-ssl.gotinder.com/u/aaa/640x800.jpg?x=1'},
+    {name: 'Bea', age: 31, url: 'https://images-ssl.gotinder.com/u/bbb/640x800.jpg'},
+    {name: 'Cleo', age: 28, url: 'https://images-ssl.gotinder.com/u/ccc/640x800.jpg'},
+  ];
+  let idx = 0;
+  function render() {
+    const c = cards[idx % cards.length];
+    document.querySelector('.photo').style.backgroundImage = `url("${c.url}")`;
+    document.querySelector('[itemprop=name]').innerText = c.name;
+    document.querySelector('[itemprop=age]').innerText = c.age;
+  }
+  function advance(kind) {
+    window.actions.push(kind);
+    idx++;
+    render();
+    if (window.actions.length === 2) document.getElementById('dialog').style.display = 'block';
+  }
+  document.getElementById('like').addEventListener('click', () => advance('like'));
+  document.getElementById('nope').addEventListener('click', () => advance('nope'));
+  document.getElementById('nothanks').addEventListener('click', () => {
+    window.actions.push('dismiss'); document.getElementById('dialog').style.display = 'none';
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowRight') advance('like');
+    if (e.key === 'ArrowLeft') advance('nope');
+    if (e.key === ' ') window.actions.push('photo');
+  });
+  window.showCaptcha = () => { document.getElementById('captcha').style.display = 'block'; };
+  window.hideCaptcha = () => { document.getElementById('captcha').style.display = 'none'; };
+</script>
+</body>
+</html>

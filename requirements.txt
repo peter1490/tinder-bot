@@ -1,0 +1,13 @@
+numpy>=1.26
+onnxruntime>=1.17
+opencv-python-headless>=4.9
+pillow>=10
+scikit-learn>=1.4
+tokenizers>=0.15
+pydantic>=2.5
+typer>=0.12
+rich>=13
+playwright>=1.45
+# recommended extras
+patchright>=1.45
+plyer>=2.1
