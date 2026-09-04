@@ -6,6 +6,7 @@ Vectors are stored as float32 BLOBs. The database uses WAL mode so the bot can w
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
 import time
@@ -267,6 +268,113 @@ class Storage:
         if not per:
             return np.zeros((0, 0), dtype=np.float32)
         return np.stack([np.mean(v, axis=0) for v in per.values()])
+
+    # ---- browsing / management (used by ``tinderbot web``) ---------------------
+    _LATEST = """SELECT d.* FROM decisions d
+                 JOIN (SELECT profile_id, MAX(id) AS mid FROM decisions GROUP BY profile_id) m ON m.mid=d.id"""
+
+    def browse_profiles(self, filter: str = "all", q: str = "", limit: int = 60, offset: int = 0,
+                        sort: str = "recent") -> tuple[list[dict[str, Any]], int]:
+        """Profiles with their latest decision; ``filter`` is all|liked|noped|uncertain|unlabelled|manual.
+
+        Returns ``(rows, total)`` where *total* is the count before ``limit``/``offset``.
+        """
+        where, args = [], []
+        if filter == "liked":
+            where.append("d.label=1")
+        elif filter == "noped":
+            where.append("d.label=0")
+        elif filter == "uncertain":
+            where.append("d.source='auto' AND d.reasons LIKE '%uncertain%'")
+        elif filter == "unlabelled":
+            where.append("d.id IS NULL")
+        elif filter == "manual":
+            where.append("d.source='manual'")
+        if q:
+            where.append("(p.name LIKE ? OR p.bio LIKE ? OR p.id LIKE ?)")
+            args += [f"%{q}%"] * 3
+        cond = (" WHERE " + " AND ".join(where)) if where else ""
+        order = {
+            "recent": "COALESCE(d.ts, p.last_seen) DESC",
+            "oldest": "COALESCE(d.ts, p.last_seen) ASC",
+            "score": "d.score DESC NULLS LAST",
+            "name": "p.name COLLATE NOCASE ASC",
+        }.get(sort, "COALESCE(d.ts, p.last_seen) DESC")
+        base = f"FROM profiles p LEFT JOIN ({self._LATEST}) d ON d.profile_id=p.id{cond}"
+        total = int(self.conn.execute(f"SELECT COUNT(*) {base}", args).fetchone()[0])
+        rows = self.conn.execute(
+            f"""SELECT p.id, p.name, p.age, p.bio, p.distance_km, p.verified, p.photo_count, p.last_seen,
+                       d.id AS decision_id, d.action, d.label, d.score, d.source, d.reasons, d.ts,
+                       (SELECT id FROM photos ph WHERE ph.profile_id=p.id AND ph.local_path IS NOT NULL
+                        ORDER BY ph.position LIMIT 1) AS cover_photo_id,
+                       (SELECT COUNT(*) FROM photos ph WHERE ph.profile_id=p.id AND ph.local_path IS NOT NULL)
+                        AS stored_photos
+                {base} ORDER BY {order} LIMIT ? OFFSET ?""",
+            [*args, limit, offset],
+        ).fetchall()
+        return [self._profile_dict(r) for r in rows], total
+
+    @staticmethod
+    def _profile_dict(r: sqlite3.Row) -> dict[str, Any]:
+        d = dict(r)
+        for k in ("jobs", "schools", "interests", "reasons", "features"):
+            if k in d and isinstance(d[k], str):
+                with contextlib.suppress(ValueError):
+                    d[k] = json.loads(d[k])
+        d.pop("raw_json", None)
+        return d
+
+    def profile_detail(self, profile_id: str) -> dict[str, Any] | None:
+        p = self.get_profile(profile_id)
+        if p is None:
+            return None
+        d = self._profile_dict(p)
+        d["photos"] = [dict(r) for r in self.photos_for_profile(profile_id)]
+        d["decisions"] = [self._profile_dict(r) for r in self.decisions_for_profile(profile_id)]
+        return d
+
+    def photos_for_profile(self, profile_id: str) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT id, url, local_path, width, height, face_count, quality, position FROM photos "
+            "WHERE profile_id=? ORDER BY position", (profile_id,)
+        ).fetchall()
+
+    def get_photo(self, photo_id: str) -> sqlite3.Row | None:
+        return self.conn.execute("SELECT * FROM photos WHERE id=?", (photo_id,)).fetchone()
+
+    def decisions_for_profile(self, profile_id: str) -> list[sqlite3.Row]:
+        return self.conn.execute("SELECT * FROM decisions WHERE profile_id=? ORDER BY id DESC", (profile_id,)).fetchall()
+
+    def set_label(self, profile_id: str, label: int) -> None:
+        """Set the training label for a profile: relabel existing decisions or add a manual one."""
+        if self.has_decision(profile_id):
+            self.relabel(profile_id, label)
+        else:
+            self.add_decision(profile_id, "like" if label else "nope", None, "manual", ["web"], label=label)
+
+    def delete_profile(self, profile_id: str) -> bool:
+        """Remove a profile with its photos, embeddings and decisions (cascade)."""
+        cur = self.conn.execute("DELETE FROM profiles WHERE id=?", (profile_id,))
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def summary(self) -> dict[str, Any]:
+        day = time.time() - (time.time() % 86400)
+        one = lambda sql, *a: int(self.conn.execute(sql, a).fetchone()[0])  # noqa: E731
+        latest = f"SELECT label, source, reasons FROM ({self._LATEST})"
+        return {
+            "profiles": one("SELECT COUNT(*) FROM profiles"),
+            "photos": one("SELECT COUNT(*) FROM photos"),
+            "liked": one(f"SELECT COUNT(*) FROM ({latest}) WHERE label=1"),
+            "noped": one(f"SELECT COUNT(*) FROM ({latest}) WHERE label=0"),
+            "uncertain": one(f"SELECT COUNT(*) FROM ({latest}) WHERE source='auto' AND reasons LIKE '%uncertain%'"),
+            "manual": one(f"SELECT COUNT(*) FROM ({latest}) WHERE source='manual'"),
+            "unlabelled": one("SELECT COUNT(*) FROM profiles p WHERE NOT EXISTS "
+                              "(SELECT 1 FROM decisions d WHERE d.profile_id=p.id)"),
+            "decisions_today": self.count_decisions(since_ts=day),
+            "references": {r[0]: int(r[1]) for r in self.conn.execute(
+                "SELECT label||'/'||kind, COUNT(*) FROM reference_vectors GROUP BY 1")},
+        }
 
     # ---- events / meta --------------------------------------------------------
     def log_event(self, kind: str, detail: str | dict = "") -> None:

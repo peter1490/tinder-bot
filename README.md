@@ -60,6 +60,7 @@ tinderbot swipe --max 40                 # one automatic session
 tinderbot swipe --loop                   # sessions with breaks until the daily budget is used
 tinderbot review                         # confirm/correct uncertain auto decisions (training labels)
 tinderbot retrain                        # refit the learned model
+tinderbot web                            # small local web app: browse photos, fix labels, delete profiles
 tinderbot stats / export
 ```
 
@@ -89,6 +90,22 @@ Decision (`tinderbot/likeness/scorer.py`):
 4. Scores within `uncertain_band` of the threshold are flagged for `tinderbot review`.
 
 Reference sets grow automatically: every labelled profile's embeddings join the liked/disliked pools.
+
+## Managing the database (`tinderbot web`)
+
+`tinderbot web` starts a small web app on `http://127.0.0.1:8765/` (standard library only, nothing leaves
+the machine) and opens it in your browser. It shows every stored profile with its photos, bio, score,
+decision history and features, filterable by liked / noped / uncertain / reviewed / unlabelled and
+searchable by name or bio. From there you can:
+
+* **correct a label** (👍 / 👎, or `L` / `N` on the keyboard) – this relabels the profile's decisions as
+  `manual`, exactly like `tinderbot review`, so the learned model and the reference pools pick it up on
+  the next retrain;
+* **delete a profile** (🗑 / `Backspace`) – removes its photos, embeddings and decisions from the DB and the
+  photo folder from `data/photos/`;
+* browse with `←` / `→`, `Esc` closes the detail panel.
+
+Use `--port`, `--host` and `--no-open` to change where it listens; keep it on localhost, there is no auth.
 
 ## Anti-detection / captcha strategy
 

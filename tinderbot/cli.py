@@ -206,6 +206,24 @@ def export(out: Path = typer.Argument(Path("decisions.json")), config: str = _cf
     console.print(f"wrote {len(rows)} rows to {out}")
 
 
+@app.command()
+def web(
+    host: str = typer.Option("127.0.0.1", help="Interface to bind (keep it on localhost)."),
+    port: int = typer.Option(8765, help="Port to listen on (0 picks a free one)."),
+    open_browser: bool = typer.Option(True, "--open/--no-open", help="Open the page in your default browser."),
+    config: str = _cfg_opt,
+):
+    """Start a small local web app to browse and manage the liked/noped database (photos, labels, delete)."""
+    from .webapp import serve
+
+    cfg = _cfg(config)
+    st = _storage(cfg)
+    try:
+        serve(cfg, st, host=host, port=port, open_browser=open_browser, log=console.print)
+    finally:
+        st.close()
+
+
 def main() -> None:
     try:
         app()
