@@ -1,4 +1,20 @@
+# secrets / local runtime state (everything the bot stores lives in data/)
 secrets.py
-_pycache_
-debug.log
-img
+config.toml
+data/
+img/
+facedir/
+*.dat
+*.log
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

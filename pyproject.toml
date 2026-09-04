@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tinderbot"
+version = "2.0.0"
+description = "Fully local Tinder auto-swiper: on-device face + CLIP likeness scoring, SQLite storage, human-in-the-loop captcha handling."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "numpy>=1.26",
+    "onnxruntime>=1.17",
+    "opencv-python-headless>=4.9",
+    "pillow>=10",
+    "scikit-learn>=1.4",
+    "tokenizers>=0.15",
+    "pydantic>=2.5",
+    "typer>=0.12",
+    "rich>=13",
+    "playwright>=1.45",
+]
+
+[project.optional-dependencies]
+# Patchright is a drop-in Playwright fork that patches the CDP leaks
+# (Runtime.enable, Console.enable, automation flags). Strongly recommended.
+stealth = ["patchright>=1.45"]
+# Desktop notifications when a captcha needs your attention.
+notify = ["plyer>=2.1"]
+dev = ["pytest>=8", "ruff>=0.4", "onnx>=1.16"]
+
+[project.scripts]
+tinderbot = "tinderbot.cli:app"
+
+[tool.setuptools.packages.find]
+include = ["tinderbot*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["B008", "SIM103", "E501"]

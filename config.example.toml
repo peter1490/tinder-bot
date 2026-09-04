@@ -1,0 +1,85 @@
+# Copy to config.toml (git-ignored) and adjust. Every path is relative to the project root.
+# Everything the bot produces (browser profile, photos, embeddings, decisions) stays under data_dir.
+
+data_dir = "data"
+
+[browser]
+# "chrome" uses your real installed Google Chrome (best for not being flagged). Set to "" to use
+# the Playwright/Patchright bundled Chromium, or set executable_path explicitly.
+channel = "chrome"
+executable_path = ""
+headless = false            # keep false: headless Chrome is a strong bot signal
+locale = ""                 # "" = leave the browser's own locale/timezone untouched (consistency > spoofing)
+slow_mo_ms = 0
+
+[pacing]
+# Session/daily budgets (Tinder's own free-tier daily like cap is ~100; humans rarely exceed 200 swipes/day)
+swipes_per_session = [40, 90]         # random in range, each session
+sessions_per_day = 3
+max_swipes_per_day = 200
+break_between_sessions_min = [20, 75]  # minutes
+active_hours = [9, 23]                 # local hours; outside this the bot waits
+# Per-profile "reading" time model (seconds). Actual time = base + per_photo*photos_browsed + per_char*bio_len
+base_seconds = [1.2, 4.5]
+per_photo_seconds = [0.8, 2.5]
+per_bio_char_seconds = 0.012
+# Probability of browsing extra photos / opening the profile like a human would
+p_browse_photos = 0.65
+max_photos_browsed = 4
+p_open_profile = 0.15
+# Occasional short pauses (phone check, distraction)
+p_micro_break = 0.06
+micro_break_seconds = [15, 90]
+
+[captcha]
+# When Tinder shows an Arkose "verify you're human" challenge the bot pauses and waits for YOU to solve it.
+wait_for_human_max_minutes = 30
+cooldown_after_captcha_minutes = [30, 90]
+# after this many challenges in one day the bot stops for the day
+max_captchas_per_day = 2
+notify_desktop = true
+sound = true
+
+[likeness]
+# Hard filters
+min_age = 18
+max_age = 99
+max_distance_km = 0          # 0 = no limit
+require_face_photo = true
+require_verified = false
+blocked_bio_keywords = []    # e.g. ["onlyfans", "cashapp"]
+liked_bio_keywords = []      # small bonus per hit, e.g. ["hiking", "climbing"]
+
+# Decision threshold on the final probability (0..1)
+like_threshold = 0.55
+# If the score is within +-band of the threshold, the profile is logged for manual review (still swiped)
+uncertain_band = 0.08
+
+# Weights of the prior (used before enough labelled examples exist and always blended in)
+[likeness.weights]
+face_sim_liked = 3.0         # cosine similarity of the best face vs. your liked reference faces
+face_sim_disliked = -2.0
+clip_sim_liked = 2.0         # whole-photo CLIP similarity vs. liked references
+clip_sim_disliked = -1.5
+text_prompts = 1.0
+photo_quality = 0.5
+bio_keywords = 0.5
+bias = -1.0
+
+# Optional zero-shot CLIP prompts. Score = mean(sim(positive)) - mean(sim(negative)).
+[likeness.prompts]
+positive = ["a clear photo of a smiling person", "a person outdoors doing sports", "a candid natural photo"]
+negative = ["a blurry photo", "a group photo with many people", "a screenshot with text", "a heavily filtered selfie"]
+
+# Learned model: logistic regression retrained from your decisions (manual review + imports).
+[likeness.learning]
+min_examples = 40            # below this only the prior is used
+blend_full_at = 300          # learned model weight ramps 0->1 between min_examples and this
+retrain_every = 25           # decisions
+
+[models]
+# All models run locally through onnxruntime. They are downloaded once into data/models.
+face_detector = "buffalo_l/det_10g"
+face_recognizer = "buffalo_l/w600k_r50"
+clip = "clip-vit-base-patch32"     # or "clip-vit-base-patch32-q8" (smaller/faster) - see tinderbot/models/registry.py
+threads = 0                        # 0 = onnxruntime default
