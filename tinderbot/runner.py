@@ -169,7 +169,31 @@ class Runner:
                 self.stats.skipped += 1
                 tp.dismiss_popups()
                 continue
+
+            # A successful click only means the input was dispatched.  Do not
+            # count or persist it until Tinder visibly advances to another
+            # card.  Otherwise a slow animation or blocking dialog can cause
+            # the same profile to be scored and clicked repeatedly.
+            time.sleep(self.pacer.post_action_delay())
+            tp.dismiss_popups()
+            next_card = tp.wait_for_new_card(last_key, timeout_s=12)
+            if next_card is None:
+                console.print("[yellow]Card transition stalled; refreshing once to verify the swipe.[/yellow]")
+                if tp.reload_recs(timeout_s=30):
+                    next_card = tp.wait_for_new_card(last_key, timeout_s=5)
+            if next_card is None:
+                self.stats.skipped += 1
+                self.storage.log_event(
+                    "swipe_unconfirmed",
+                    {"profile_id": profile.id, "action": verdict.action, "card_key": last_key},
+                )
+                console.print(
+                    "[yellow]Swipe was not confirmed by a new card; stopping to avoid a duplicate action.[/yellow]"
+                )
+                return done
+
             self.storage.add_decision(profile.id, verdict.action, verdict.score, "auto", verdict.reasons, feats)
+            tp.queue.pop(profile.id)
             self.scorer.maybe_retrain()
             done += 1
             if verdict.like:
@@ -178,11 +202,8 @@ class Runner:
                 self.stats.noped += 1
             tag = "[bold green]LIKE[/bold green]" if verdict.like else "[bold red]NOPE[/bold red]"
             console.print(f"{tag} {profile.name} {profile.age or ''}  p={verdict.score:.2f}  {', '.join(verdict.reasons)}")
-            time.sleep(self.pacer.post_action_delay())
-            tp.dismiss_popups()
             if plan["micro_break"]:
                 time.sleep(plan["micro_break"])
-            tp.wait_for_new_card(last_key, timeout_s=10)
         return done
 
     def run_shadow(self, max_cards: int | None = None) -> RunStats:

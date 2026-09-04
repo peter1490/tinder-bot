@@ -75,6 +75,15 @@ def test_queue_matching():
     assert q.match("Bea", None) is None
 
 
+def test_queue_prefers_visible_identity_over_stacked_card_photos():
+    q = RecsQueue()
+    q.add_payload(PAYLOAD)
+    # The DOM may expose Ana's background image while Bea is the visible card.
+    # Visible name + age must win over that stale/stacked photo URL.
+    r = q.match("Bea", None, ["https://images-ssl.gotinder.com/u/p1/640x800.jpg"])
+    assert r and r.id == "u2"
+
+
 def test_url_pattern_and_dom_id():
     assert RECS_URL_PATTERN.search("https://api.gotinder.com/v2/recs/core?locale=en")
     assert RECS_URL_PATTERN.search("https://api.gotinder.com/v3/recs/core")

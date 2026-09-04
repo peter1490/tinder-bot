@@ -39,6 +39,8 @@ SELECTORS = {
 POPUP_DISMISS_TEXTS = [
     "No Thanks", "Not interested", "Maybe later", "Not now", "Back to Tinder", "Keep swiping",
     "Keep Swiping", "Skip", "Dismiss", "Got it", "Remind me later", "I'll pass",
+    # Common French equivalents shown when Tinder follows the browser locale.
+    "Non merci", "Pas maintenant", "Peut-être plus tard", "Retour à Tinder", "Continuer de swiper",
 ]
 POPUP_DISMISS_SELECTORS = [
     'button[title="Back to Tinder"]',
@@ -90,7 +92,13 @@ class CardInfo:
 
     @property
     def key(self) -> str:
-        return f"{self.name}|{self.age}|{self.photo_urls[0] if self.photo_urls else ''}"
+        # The visible photo URL changes when a profile's gallery is browsed.  It
+        # therefore cannot be part of the DOM card identity: doing so can make
+        # the current profile look like a new card before a swipe has advanced
+        # Tinder.  Name + age is deliberately conservative; in the rare case
+        # of consecutive identical values, confirmation times out instead of
+        # risking a duplicate action.
+        return f"{self.name.strip().casefold()}|{self.age}"
 
 
 class TinderPage:
@@ -155,6 +163,14 @@ class TinderPage:
                 return True
             time.sleep(0.8)
         return False
+
+    def reload_recs(self, timeout_s: float = 30.0) -> bool:
+        """Reload recommendations after a stalled transition and wait for a usable card."""
+        try:
+            self.page.reload(wait_until="domcontentloaded")
+        except Exception:
+            return False
+        return self.wait_ready(timeout_s)
 
     # ---- reading the card ----------------------------------------------------------------
     def current_card(self) -> CardInfo:

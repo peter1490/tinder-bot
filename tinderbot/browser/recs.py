@@ -145,15 +145,24 @@ class RecsQueue:
     def match(self, name: str | None, age: int | None, photo_urls: Iterable[str] = ()) -> ProfileRecord | None:
         urls = {u.split("?")[0] for u in photo_urls if u}
         cands = list(self._by_id.values())
+        if name:
+            n = name.strip().lower()
+            matches = [r for r in cands if r.name.strip().lower() == n and (age is None or r.age is None or r.age == age)]
+            if len(matches) == 1:
+                return matches[0]
+            if matches and urls:
+                for r in matches:
+                    if any(u.split("?")[0] in urls for u in r.photo_urls):
+                        return r
+            if matches:
+                return matches[0]
+        # The DOM can expose background images from stacked cards.  Treat a
+        # photo-only match as a fallback, never as stronger evidence than the
+        # visible name and age.
         if urls:
             for r in cands:
                 if any(u.split("?")[0] in urls for u in r.photo_urls):
                     return r
-        if name:
-            n = name.strip().lower()
-            matches = [r for r in cands if r.name.strip().lower() == n and (age is None or r.age is None or r.age == age)]
-            if len(matches) >= 1:
-                return matches[0]
         return None
 
     def pop(self, profile_id: str) -> None:

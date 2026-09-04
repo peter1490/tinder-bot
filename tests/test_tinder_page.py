@@ -10,10 +10,23 @@ import pytest
 
 from tests.conftest import CHROME
 from tinderbot.browser.captcha import CaptchaPolicy, Challenge, detect_challenge
-from tinderbot.browser.tinder_page import TinderPage
+from tinderbot.browser.tinder_page import POPUP_DISMISS_TEXTS, CardInfo, TinderPage
 from tinderbot.config import CaptchaConfig
 
 FIXTURE = Path(__file__).parent / "fixtures" / "mock_tinder.html"
+
+
+def test_card_key_does_not_change_when_browsing_photos():
+    first_photo = CardInfo(name="Ana", age=25, photo_urls=["https://example.test/first.jpg"])
+    later_photo = CardInfo(name=" Ana ", age=25, photo_urls=["https://example.test/later.jpg"])
+    next_profile = CardInfo(name="Bea", age=25, photo_urls=["https://example.test/first.jpg"])
+
+    assert first_photo.key == later_photo.key
+    assert first_photo.key != next_profile.key
+
+
+def test_french_super_like_upsell_can_be_dismissed():
+    assert "Non merci" in POPUP_DISMISS_TEXTS
 
 
 @pytest.fixture(scope="module")
