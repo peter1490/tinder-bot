@@ -28,7 +28,7 @@ dependencies = [
 stealth = ["patchright>=1.45"]
 # Desktop notifications when a captcha needs your attention.
 notify = ["plyer>=2.1"]
-dev = ["pytest>=8", "ruff>=0.4"]
+dev = ["pytest>=8", "ruff>=0.4", "onnx>=1.16"]
 
 [project.scripts]
 tinderbot = "tinderbot.cli:app"
