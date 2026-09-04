@@ -423,7 +423,7 @@ function card(p,i){
   const dist=p.distance_km!=null?`${Math.round(p.distance_km)} km`:"";
   return `<div class="card ${i===state.sel?"sel":""}" data-i="${i}">
     <div class="ph">${img}</div>${badge(p)}${p.verified?'<span class="ver" title="verified">✓</span>':""}
-    <div class="quick"><button data-a="like" title="like">👍</button><button data-a="nope" title="nope">👎</button><button data-a="del" title="delete">🗑</button></div>
+    <div class="quick"><button data-a="like" title="${p.source!=="manual"&&p.label===1?"confirm like":"like"}">👍</button><button data-a="nope" title="${p.source!=="manual"&&p.label===0?"confirm nope":"nope"}">👎</button><button data-a="del" title="delete">🗑</button></div>
     <div class="meta"><div class="name">${esc(p.name)||"<i>unknown</i>"}${age}</div>
     <div class="sub"><span>${dist}</span><span>${p.stored_photos||0} photos</span></div></div></div>`;
 }
@@ -477,7 +477,12 @@ function renderDetail(d){
     d.decisions.map(x=>`<tr><td>${fmtTs(x.ts)}</td><td>${x.action}</td><td>${x.label==null?"—":x.label?"like":"nope"}</td><td class="num">${x.score!=null?Number(x.score).toFixed(3):"—"}</td><td>${x.source||""}</td><td>${esc((x.reasons||[]).join(", "))}</td></tr>`).join("")+"</table>":'<span style="color:var(--muted)">no decision yet</span>';
   const f=latest.features;
   $("dFeatures").innerHTML=f&&typeof f==="object"?`<details><summary>features (${Object.keys(f).length})</summary><table>${Object.entries(f).map(([k,v])=>`<tr><td>${esc(k)}</td><td class="num">${typeof v==="number"?v.toFixed(3):esc(v)}</td></tr>`).join("")}</table></details>`:"";
-  $("aLike").disabled=latest.label===1;$("aNope").disabled=latest.label===0;
+  // auto decisions (uncertain or not) can always be confirmed or overridden -> they become manual labels;
+  // only an already reviewed label disables its own button
+  const reviewed=latest.source==="manual";
+  $("aLike").disabled=reviewed&&latest.label===1;$("aNope").disabled=reviewed&&latest.label===0;
+  $("aLike").textContent=(!reviewed&&latest.label===1)?"✓ confirm like (L)":"👍 like (L)";
+  $("aNope").textContent=(!reviewed&&latest.label===0)?"✓ confirm nope (N)":"👎 nope (N)";
 }
 function closeDrawer(){$("drawer").classList.remove("open");state.detail=null;}
 $("back").onclick=closeDrawer;$("close").onclick=closeDrawer;
