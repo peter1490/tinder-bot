@@ -101,12 +101,25 @@ class CardInfo:
         return f"{self.name.strip().casefold()}|{self.age}"
 
 
+_JS_FETCH_PHOTO = """
+async (url) => {
+  const r = await fetch(url, {credentials: 'include', cache: 'force-cache'});
+  if (!r.ok) return null;
+  const b = await r.blob();
+  return await new Promise((res) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.readAsDataURL(b); });
+}
+"""
+
+
 class TinderPage:
-    def __init__(self, page, rng: random.Random | None = None):
+    def __init__(self, page, rng: random.Random | None = None, keyboard_pref: float = 0.0):
         self.page = page
         self.rng = rng or random.Random()
         self.mouse = HumanMouse(page, self.rng)
         self.queue = RecsQueue()
+        # Share of actions done with the keyboard shortcuts rather than the mouse (per-session persona).
+        self.keyboard_pref = keyboard_pref
+        self._page_fetch_failures = 0
         self.human_actions: list[tuple[str, str]] = []  # ('like'|'pass', profile_id) seen on the network
         self._install_listeners()
 
@@ -187,7 +200,23 @@ class TinderPage:
         return info
 
     def fetch_photo(self, url: str, timeout_ms: int = 15000) -> bytes | None:
-        """Download through the browser's own request context (same cookies/headers as the app)."""
+        """Download a photo the way the app itself would.
+
+        First choice is ``fetch()`` inside the page: it reuses the browser's HTTP cache (the card's
+        photos are usually already there) and sends exactly the headers the web app sends.  If the
+        CDN refuses cross-origin reads the browser context's request API is used instead (same
+        cookies, slightly different headers).
+        """
+        if self._page_fetch_failures < 3:
+            try:
+                data_url = self.page.evaluate(_JS_FETCH_PHOTO, url)
+                if isinstance(data_url, str) and "," in data_url:
+                    import base64
+
+                    return base64.b64decode(data_url.split(",", 1)[1])
+                self._page_fetch_failures += 1
+            except Exception:
+                self._page_fetch_failures += 1
         try:
             r = self.page.context.request.get(url, timeout=timeout_ms)
             if r.ok:
@@ -206,9 +235,10 @@ class TinderPage:
     def browse_photos(self, n: int) -> int:
         """Advance through photos with Space (Tinder's shortcut) or a click on the card's right half."""
         done = 0
+        use_keys = self.keyboard_pref if self.keyboard_pref > 0 else 0.5
         for _ in range(max(0, n)):
             try:
-                if self.rng.random() < 0.5:
+                if self.rng.random() < use_keys:
                     self.page.keyboard.press("Space")
                 else:
                     vp = self.page.viewport_size or {"width": 1280, "height": 800}
@@ -244,7 +274,7 @@ class TinderPage:
 
     # ---- actions --------------------------------------------------------------------------
     def _press(self, key: str, shortcut: str) -> bool:
-        loc = self._first(key)
+        loc = None if self.rng.random() < self.keyboard_pref else self._first(key)
         if loc is not None:
             try:
                 self.mouse.click(loc)

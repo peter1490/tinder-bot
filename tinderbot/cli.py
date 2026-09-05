@@ -111,6 +111,122 @@ def swipe(
     console.print(f"liked={stats.liked} noped={stats.noped} skipped={stats.skipped} captchas={stats.captchas}")
 
 
+def _scheduler(cfg: Config, st, seed: int | None = None):
+    from .schedule import Scheduler
+
+    def make_runner():
+        from .models.loader import Models
+        from .runner import Runner
+
+        return Runner(cfg, st, Models(cfg), seed=seed)
+
+    import random
+
+    from rich.markup import escape
+
+    return Scheduler(cfg, st, make_runner, rng=random.Random(seed), log=lambda m: console.print(escape(m)))
+
+
+@app.command()
+def auto(
+    dry_run: bool = typer.Option(False, "--dry-run", help="Print today's plan (persisting it) and exit without a browser."),
+    max_sessions: int = typer.Option(None, "--max-sessions", help="Stop after this many sessions (default: run forever)."),
+    seed: int = typer.Option(None, help="Random seed (for reproducible plans in tests)."),
+    config: str = _cfg_opt,
+):
+    """Fully unattended mode: plan random sessions per day, open the browser only to swipe, close it after.
+
+    Runs until a halt condition (account notice, lost login, unsolved challenges, repeated errors) or Ctrl-C.
+    """
+    from rich.markup import escape
+
+    cfg = _cfg(config)
+    st = _storage(cfg)
+    sched = _scheduler(cfg, st, seed)
+    h = sched.halted()
+    if h:
+        console.print(f"[red]Halted ({h.get('reason')}: {h.get('detail')}). Fix the cause, then `tinderbot resume`.[/red]")
+        raise typer.Exit(2)
+    plan = sched.plan_for(sched.today())
+    for line in plan.describe():
+        console.print(escape(line))
+    if dry_run:
+        return
+    console.print("[green]Unattended mode. The browser opens only for sessions; Ctrl-C to stop.[/green]")
+    try:
+        sched.run(max_sessions=max_sessions)
+    finally:
+        st.close()
+
+
+@app.command()
+def plan(
+    days: int = typer.Option(3, help="How many days to preview (only today's plan is persisted)."),
+    seed: int = typer.Option(None),
+    config: str = _cfg_opt,
+):
+    """Show today's session plan and a preview of the next days (no browser)."""
+    import datetime as dt
+
+    from rich.markup import escape
+
+    from .schedule import plan_day, ramp_factor
+
+    cfg = _cfg(config)
+    st = _storage(cfg)
+    sched = _scheduler(cfg, st, seed)
+    today = sched.today()
+    for line in sched.plan_for(today).describe():
+        console.print(escape(line))
+    ramp = ramp_factor(cfg, st)
+    for i in range(1, max(1, days)):
+        day = today + dt.timedelta(days=i)
+        existing = sched.load_plan(day)
+        p = existing or plan_day(cfg, day, sched.rng, ramp=ramp)
+        for line in p.describe():
+            console.print(("" if existing else "[dim](preview) [/dim]") + escape(line))
+
+
+@app.command()
+def status(config: str = _cfg_opt):
+    """Show the unattended bot's state: halt reason, pause, today's plan, recent events."""
+    import datetime as dt
+
+    from rich.markup import escape
+
+    from .schedule import META_ERROR_STREAK, META_UNSOLVED_STREAK
+
+    cfg = _cfg(config)
+    st = _storage(cfg)
+    sched = _scheduler(cfg, st)
+    h = sched.halted()
+    if h:
+        console.print(f"[red]HALTED[/red] {h.get('reason')}: {h.get('detail')}  "
+                      f"(since {dt.datetime.fromtimestamp(h.get('ts', 0)):%Y-%m-%d %H:%M}) -> `tinderbot resume`")
+    else:
+        console.print("[green]not halted[/green]")
+    pu = sched.pause_until()
+    if pu > time.time():
+        console.print(f"paused until {dt.datetime.fromtimestamp(pu):%Y-%m-%d %H:%M}")
+    console.print(f"unsolved challenge streak: {st.get_meta(META_UNSOLVED_STREAK, 0)}  "
+                  f"error streak: {st.get_meta(META_ERROR_STREAK, 0)}")
+    p = sched.load_plan(sched.today())
+    for line in (p.describe() if p else ["no plan for today yet"]):
+        console.print(escape(line))
+    console.print("recent events:")
+    for e in reversed(st.recent_events(12)):
+        console.print(escape(f"  {dt.datetime.fromtimestamp(e['ts']):%m-%d %H:%M} {e['kind']:18s} {(e['detail'] or '')[:90]}"))
+
+
+@app.command()
+def resume(config: str = _cfg_opt):
+    """Clear a halt/pause so `tinderbot auto` can run again (after you fixed the cause)."""
+    cfg = _cfg(config)
+    st = _storage(cfg)
+    _scheduler(cfg, st).resume()
+    console.print("[green]Cleared halt, pause and streak counters.[/green]")
+
+
 @app.command()
 def score(
     images: list[Path] = typer.Argument(..., help="Photos of one profile (or a folder)."),
@@ -177,7 +293,9 @@ def stats(config: str = _cfg_opt):
     """Show what is stored locally."""
     cfg = _cfg(config)
     st = _storage(cfg)
-    day = time.time() - (time.time() % 86400)
+    from .browser.pacing import local_midnight_ts
+
+    day = local_midnight_ts()
     t = Table(title=str(cfg.db_path))
     t.add_column("metric")
     t.add_column("value", justify="right")
@@ -189,6 +307,8 @@ def stats(config: str = _cfg_opt):
     t.add_row("likes / nopes", f"{st.count_decisions(action='like')} / {st.count_decisions(action='nope')}")
     t.add_row("manual labels", str(st.count_decisions(source="manual")))
     t.add_row("captchas today", str(st.count_events("captcha", day)))
+    halt = st.get_meta("halt")
+    t.add_row("unattended state", f"HALTED: {halt.get('reason')}" if halt else "ok")
     for k, v in st.conn.execute("SELECT label||'/'||kind, COUNT(*) FROM reference_vectors GROUP BY 1"):
         t.add_row(f"references {k}", str(v))
     console.print(t)
