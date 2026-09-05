@@ -99,6 +99,17 @@ def from_blob(blob: bytes, dim: int | None = None) -> np.ndarray:
     return v if dim is None else v[:dim]
 
 
+def recurring_vector(vectors: list[np.ndarray]) -> np.ndarray:
+    """The vector most similar (cosine) to all the others: the person who recurs across a profile's photos."""
+    if len(vectors) == 1:
+        return vectors[0]
+    m = np.stack(vectors).astype(np.float32)
+    n = m / np.maximum(np.linalg.norm(m, axis=1, keepdims=True), 1e-9)
+    sims = n @ n.T
+    np.fill_diagonal(sims, 0.0)
+    return m[int(np.argmax(sims.sum(axis=1)))]
+
+
 @dataclass
 class ProfileRecord:
     id: str
@@ -149,6 +160,23 @@ class Storage:
     def get_profile(self, profile_id: str) -> sqlite3.Row | None:
         return self.conn.execute("SELECT * FROM profiles WHERE id=?", (profile_id,)).fetchone()
 
+    def profile_record(self, profile_id: str) -> ProfileRecord | None:
+        """Rebuild a :class:`ProfileRecord` (with the stored photo urls) from the database."""
+        r = self.get_profile(profile_id)
+        if r is None:
+            return None
+
+        def lst(s: str | None) -> list[str]:
+            with contextlib.suppress(ValueError, TypeError):
+                v = json.loads(s or "[]")
+                return [str(x) for x in v] if isinstance(v, list) else []
+            return []
+
+        urls = [row["url"] or "" for row in self.photos_for_profile(profile_id)]
+        return ProfileRecord(id=r["id"], name=r["name"] or "", age=r["age"], bio=r["bio"] or "",
+                             distance_km=r["distance_km"], verified=bool(r["verified"]), jobs=lst(r["jobs"]),
+                             schools=lst(r["schools"]), interests=lst(r["interests"]), photo_urls=urls)
+
     def has_decision(self, profile_id: str) -> bool:
         return self.conn.execute("SELECT 1 FROM decisions WHERE profile_id=? LIMIT 1", (profile_id,)).fetchone() is not None
 
@@ -183,11 +211,22 @@ class Storage:
         ).fetchall()
         return [from_blob(r["vector"], r["dim"]) for r in rows]
 
+    def photo_embedding_rows(self, profile_id: str) -> list[sqlite3.Row]:
+        """Every stored photo of a profile joined with its embeddings (one row per embedding, photos
+        without embeddings still appear once with NULL embedding columns)."""
+        return self.conn.execute(
+            """SELECT p.id AS photo_id, p.url, p.local_path, p.width, p.height, p.quality, p.position,
+                      e.kind, e.idx, e.vector, e.dim, e.meta
+               FROM photos p LEFT JOIN embeddings e ON e.photo_id=p.id
+               WHERE p.profile_id=? ORDER BY p.position, e.kind, e.idx""",
+            (profile_id,),
+        ).fetchall()
+
     # ---- decisions ----------------------------------------------------------
     def add_decision(self, profile_id: str, action: str, score: float | None, source: str,
                      reasons: Iterable[str] = (), features: dict | None = None, label: int | None = None) -> int:
         if label is None:
-            label = {"like": 1, "nope": 0}.get(action)
+            label = {"like": 1, "superlike": 1, "nope": 0}.get(action)
         cur = self.conn.execute(
             "INSERT INTO decisions(profile_id,action,label,score,source,reasons,features,ts) VALUES(?,?,?,?,?,?,?,?)",
             (profile_id, action, label, score, source, json.dumps(list(reasons)),
@@ -277,21 +316,36 @@ class Storage:
             self.conn.execute("DELETE FROM reference_vectors")
         self.conn.commit()
 
-    def liked_profile_vectors(self, kind: str, label: int) -> np.ndarray:
-        """Mean embedding per profile for profiles with the given training label (1 like / 0 nope)."""
+    def labelled_profile_vectors(self, kind: str, label: int) -> tuple[list[str], np.ndarray]:
+        """One reference vector per profile whose latest training label is ``label`` (1 like / 0 nope).
+
+        * ``face``: the profile's *primary* face (the largest face of each photo, then the one that
+          recurs across photos) so friends in group shots never enter the reference pool;
+        * ``clip``: the mean whole-photo embedding.
+
+        Returns ``(profile_ids, matrix)`` aligned by row, so a caller can leave a profile's own vector
+        out when scoring that same profile.
+        """
         rows = self.conn.execute(
-            """SELECT p.profile_id, e.vector, e.dim FROM decisions d
+            """SELECT p.profile_id, e.idx, e.vector, e.dim FROM decisions d
                JOIN (SELECT profile_id, MAX(id) AS mid FROM decisions GROUP BY profile_id) m ON m.mid=d.id
                JOIN photos p ON p.profile_id=d.profile_id JOIN embeddings e ON e.photo_id=p.id
-               WHERE d.label=? AND e.kind=?""",
+               WHERE d.label=? AND e.kind=? ORDER BY p.profile_id, p.position, e.idx""",
             (label, kind),
         ).fetchall()
         per: dict[str, list[np.ndarray]] = {}
         for r in rows:
+            if kind == "face" and r["idx"] != 0:
+                continue  # only the largest face of every photo
             per.setdefault(r["profile_id"], []).append(from_blob(r["vector"], r["dim"]))
         if not per:
-            return np.zeros((0, 0), dtype=np.float32)
-        return np.stack([np.mean(v, axis=0) for v in per.values()])
+            return [], np.zeros((0, 0), dtype=np.float32)
+        ids = list(per)
+        if kind == "face":
+            m = np.stack([recurring_vector(per[i]) for i in ids])
+        else:
+            m = np.stack([np.mean(per[i], axis=0) for i in ids])
+        return ids, m.astype(np.float32)
 
     # ---- browsing / management (used by ``tinderbot web``) ---------------------
     _LATEST = """SELECT d.* FROM decisions d
@@ -385,11 +439,12 @@ class Storage:
     def summary(self) -> dict[str, Any]:
         day = time.time() - (time.time() % 86400)
         one = lambda sql, *a: int(self.conn.execute(sql, a).fetchone()[0])  # noqa: E731
-        latest = f"SELECT label, source, reasons FROM ({self._LATEST})"
+        latest = f"SELECT label, source, reasons, action FROM ({self._LATEST})"
         return {
             "profiles": one("SELECT COUNT(*) FROM profiles"),
             "photos": one("SELECT COUNT(*) FROM photos"),
             "liked": one(f"SELECT COUNT(*) FROM ({latest}) WHERE label=1"),
+            "superliked": one(f"SELECT COUNT(*) FROM ({latest}) WHERE action='superlike'"),
             "noped": one(f"SELECT COUNT(*) FROM ({latest}) WHERE label=0"),
             "uncertain": one(f"SELECT COUNT(*) FROM ({latest}) WHERE source='auto' AND reasons LIKE '%uncertain%'"),
             "manual": one(f"SELECT COUNT(*) FROM ({latest}) WHERE source='manual'"),

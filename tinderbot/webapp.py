@@ -293,6 +293,7 @@ main{max-width:1400px;margin:0 auto;padding:16px}
 .badge{position:absolute;top:8px;left:8px;font-size:11px;font-weight:700;letter-spacing:.03em;border-radius:999px;padding:3px 8px;background:var(--neutral-bg);color:var(--neutral)}
 .badge.like{background:var(--like-bg);color:var(--like)}
 .badge.nope{background:var(--nope-bg);color:var(--nope)}
+.badge.superlike{background:var(--like);color:#fff}
 .badge.uncertain{background:var(--warn-bg);color:var(--warn)}
 .badge.manual::after{content:" ✎"}
 .ver{position:absolute;top:8px;right:8px;background:#2563eb;color:#fff;border-radius:50%;width:20px;height:20px;font-size:12px;display:flex;align-items:center;justify-content:center}
@@ -395,14 +396,15 @@ function verdictOf(p){
 function badge(p){
   const v=verdictOf(p);if(!v&&!p.action)return '<span class="badge">new</span>';
   const unc=p.source==="auto"&&(p.reasons||[]).some(r=>String(r).includes("uncertain"));
-  const cls=[ "badge", v, unc?"uncertain":"", p.source==="manual"?"manual":"" ].join(" ");
+  const sup=p.action==="superlike"&&v==="like";
+  const cls=[ "badge", v, sup?"superlike":"", unc?"uncertain":"", p.source==="manual"?"manual":"" ].join(" ");
   const sc=p.score!=null?` ${Number(p.score).toFixed(2)}`:"";
-  return `<span class="${cls}">${v.toUpperCase()}${sc}</span>`;
+  return `<span class="${cls}">${sup?"★ SUPER LIKE":v.toUpperCase()}${sc}</span>`;
 }
 
 async function loadStats(){
   const s=await api("/api/summary");
-  $("stats").innerHTML=[["profiles",s.profiles],["liked",s.liked],["noped",s.noped],["uncertain",s.uncertain],["reviewed",s.manual],["unlabelled",s.unlabelled],["today",s.decisions_today]]
+  $("stats").innerHTML=[["profiles",s.profiles],["liked",s.liked],["super liked",s.superliked],["noped",s.noped],["uncertain",s.uncertain],["reviewed",s.manual],["unlabelled",s.unlabelled],["today",s.decisions_today]]
     .map(([k,v])=>`<span class="chip">${k} <b>${v}</b></span>`).join("")
     +Object.entries(s.references||{}).map(([k,v])=>`<span class="chip">ref ${k} <b>${v}</b></span>`).join("");
 }

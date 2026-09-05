@@ -24,6 +24,7 @@ from .browser.pacing import LikeGovernor, Pacer
 from .browser.recs import dom_profile_id
 from .browser.tinder_page import RECS_URL, CardInfo, TinderPage
 from .config import Config
+from .crush import CrushPolicy
 from .likeness.features import FeatureExtractor
 from .likeness.scorer import Scorer, Verdict
 from .models.loader import Models
@@ -56,6 +57,8 @@ class RunStats:
     skipped: int = 0
     captchas: int = 0
     downgraded: int = 0   # LIKE verdicts turned into NOPE by the like-ratio governor
+    super_liked: int = 0
+    notes: int = 0
 
     @property
     def total(self) -> int:
@@ -82,10 +85,14 @@ class Runner:
         self.models = models
         self.rng = random.Random(seed)
         self.extractor = FeatureExtractor(cfg, models, storage)
-        self.scorer = Scorer(cfg, storage)
+        self.scorer = Scorer(cfg, storage, extractor=self.extractor)
+        if self.scorer.stale:
+            console.print("[yellow]Saved likeness model was trained on an older feature layout; retraining.[/yellow]")
+            self.scorer.retrain()
         self.pacer = Pacer(cfg.pacing, storage, self.rng)
         self.governor = LikeGovernor(cfg.pacing, storage)
         self.captcha = CaptchaPolicy(cfg.captcha, storage, self.rng)
+        self.crush = CrushPolicy(cfg.crush, storage, self.rng)
         self.stats = RunStats()
         self.stop_reason: str = STOP_PLANNED
 
@@ -277,7 +284,24 @@ class Runner:
             if self.rng.random() < 0.5:
                 tp.mouse.wiggle()
             time.sleep(plan["read_seconds"])
-            ok = tp.like() if action_like else tp.nope()
+            # the governor may have downgraded the like; only a like that is actually sent can be a Super Like
+            action, note = ("like" if action_like else "nope"), None
+            if action_like:
+                want = self.crush.plan(verdict, tp.super_likes_remaining)
+                if want:
+                    note = self.crush.note_for(profile) if want == "superlike_note" else None
+                    status = tp.super_like(note)
+                    if status in ("sent", "sent_note"):
+                        action, note, ok = "superlike", (note if status == "sent_note" else None), True
+                    else:
+                        if status == "unavailable":
+                            self.crush.mark_unavailable()
+                            console.print("[yellow]Tinder has no Super Like available today; sending a normal like.[/yellow]")
+                        note, ok = None, tp.like()
+                else:
+                    ok = tp.like()
+            else:
+                ok = tp.nope()
             if not ok:
                 self.stats.skipped += 1
                 tp.dismiss_popups()
@@ -298,7 +322,7 @@ class Runner:
                 self.stats.skipped += 1
                 self.storage.log_event(
                     "swipe_unconfirmed",
-                    {"profile_id": profile.id, "action": "like" if action_like else "nope", "card_key": last_key},
+                    {"profile_id": profile.id, "action": action, "card_key": last_key},
                 )
                 console.print(
                     "[yellow]Swipe was not confirmed by a new card; stopping to avoid a duplicate action.[/yellow]"
@@ -307,8 +331,12 @@ class Runner:
                 return done
 
             # The training label follows the scorer's verdict, the action records what was done.
-            self.storage.add_decision(profile.id, "like" if action_like else "nope", verdict.score, "auto",
-                                      reasons, feats, label=1 if verdict.like else 0)
+            self.storage.add_decision(profile.id, action, verdict.score, "auto", reasons, feats,
+                                      label=1 if verdict.like else 0)
+            if action == "superlike":
+                self.crush.record(profile.id, note)
+                self.stats.super_liked += 1
+                self.stats.notes += 1 if note else 0
             tp.queue.pop(profile.id)
             self.scorer.maybe_retrain()
             done += 1
@@ -316,8 +344,13 @@ class Runner:
                 self.stats.liked += 1
             else:
                 self.stats.noped += 1
-            tag = "[bold green]LIKE[/bold green]" if action_like else "[bold red]NOPE[/bold red]"
+            if action == "superlike":
+                tag = "[bold magenta]SUPER LIKE" + (" + note" if note else "") + "[/bold magenta]"
+            else:
+                tag = "[bold green]LIKE[/bold green]" if action_like else "[bold red]NOPE[/bold red]"
             console.print(f"{tag} {profile.name} {profile.age or ''}  p={verdict.score:.2f}  {', '.join(reasons)}")
+            if note:
+                console.print(f"   note: {note}")
             if plan["micro_break"]:
                 time.sleep(plan["micro_break"])
             if done < n and self.pacer.should_end_early(done, n):
@@ -356,16 +389,18 @@ class Runner:
                 while tp.human_actions:
                     action, pid = tp.human_actions.pop(0)
                     entry = pending.pop(pid, None)
-                    label = 1 if action == "like" else 0
+                    label = 1 if action in ("like", "superlike") else 0
                     if entry is None:  # DOM-id fallback: attribute to the most recent pending card
                         if not pending:
                             continue
                         pid, entry = pending.popitem()
                     profile, verdict, feats = entry
-                    self.storage.add_decision(profile.id, "like" if label else "nope", verdict.score, "manual",
+                    stored = "superlike" if action == "superlike" else ("like" if label else "nope")
+                    self.storage.add_decision(profile.id, stored, verdict.score, "manual",
                                               verdict.reasons, feats, label=label)
                     agree = (label == 1) == verdict.like
-                    console.print(f"   you: {'LIKE' if label else 'NOPE'} -> {'agree' if agree else 'DISAGREE'}")
+                    you = "SUPER LIKE" if stored == "superlike" else ("LIKE" if label else "NOPE")
+                    console.print(f"   you: {you} -> {'agree' if agree else 'DISAGREE'}")
                     self.scorer.maybe_retrain()
                 time.sleep(0.5)
         except KeyboardInterrupt:

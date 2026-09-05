@@ -7,6 +7,7 @@ like/nope actions fall back to Tinder's own keyboard shortcuts.
 
 from __future__ import annotations
 
+import json
 import random
 import re
 import time
@@ -28,12 +29,33 @@ SELECTORS = {
         'button:has(span.Hidden:text-is("Nope"))',
         'button:has-text("Nope")',
     ],
+    "super_like": [
+        'button[aria-label="Super Like"]',
+        'button:has(span.Hidden:text-is("Super Like"))',
+        'button:has-text("Super Like")',
+    ],
+    # the "add a note to your Super Like" composer (Tinder shows it right after the Super Like click)
+    "note_input": [
+        'div[role="dialog"] textarea',
+        'textarea[placeholder*="note" i]',
+        'textarea[placeholder*="message" i]',
+        'div[role="dialog"] [contenteditable="true"]',
+    ],
     "open_profile": ['button[aria-label*="Open Profile" i]', 'button[aria-label*="Show more" i]'],
     "close_profile": ['button[aria-label*="Close Profile" i]', 'button[aria-label*="Close" i]'],
     "name": ['[itemprop="name"]', 'h1 span:first-child'],
     "age": ['[itemprop="age"]', 'h1 span:nth-child(2)'],
     "login_button": ['a[href*="login"]', 'button:has-text("Log in")', 'div[aria-label="Log in"]'],
 }
+
+# Buttons that send the Super Like from the note composer (with or without a note typed).
+NOTE_SEND_TEXTS = ["Send Super Like", "Send note", "Send", "Super Like", "Envoyer le Super Like", "Envoyer"]
+# Wording of the upsell Tinder shows instead of sending when no Super Like is available.
+SUPERLIKE_UPSELL_TEXTS = [
+    "out of super likes", "get super likes", "get more super likes", "buy super likes", "more super likes",
+    "unlock super likes", "super likes to get noticed", "upgrade to send",
+    "plus de super likes", "obtenir des super likes", "acheter des super likes", "obtenez des super likes",
+]
 
 # Buttons that dismiss upsells / prompts. Text is matched case-insensitively.
 POPUP_DISMISS_TEXTS = [
@@ -121,24 +143,46 @@ class TinderPage:
         self.keyboard_pref = keyboard_pref
         self._page_fetch_failures = 0
         self.human_actions: list[tuple[str, str]] = []  # ('like'|'pass', profile_id) seen on the network
+        self.human_actions: list[tuple[str, str]] = []  # ('like'|'superlike'|'pass', profile_id) seen on the network
+        self.super_likes_remaining: int | None = None    # as last reported by Tinder's own responses
+        self._sleep = time.sleep
         self._install_listeners()
 
     # ---- network observation --------------------------------------------------------
     def _install_listeners(self) -> None:
         def on_response(resp):
             try:
-                if RECS_URL_PATTERN.search(resp.url) and resp.status == 200:
+                url = resp.url
+                if resp.status != 200:
+                    return
+                if RECS_URL_PATTERN.search(url):
                     self.queue.add_payload(resp.text())
+                elif "api.gotinder.com" in url and ("/like/" in url or "/profile" in url):
+                    self._observe_super_like_balance(resp.text())
             except Exception:
                 pass
 
         def on_request(req):
-            m = re.search(r"api\.gotinder\.com/(like|pass)/([A-Za-z0-9]+)", req.url)
+            m = re.search(r"api\.gotinder\.com/(like|pass)/([A-Za-z0-9]+)(/super)?", req.url)
             if m:
-                self.human_actions.append((m.group(1), m.group(2)))
+                self.human_actions.append(("superlike" if m.group(3) else m.group(1), m.group(2)))
 
         self.page.on("response", on_response)
         self.page.on("request", on_request)
+
+    def _observe_super_like_balance(self, body: str) -> None:
+        """Like / profile responses carry ``super_likes.remaining``; remember it (never requested by us)."""
+        if "super_likes" not in body:
+            return
+        try:
+            data = json.loads(body)
+        except ValueError:
+            return
+        if isinstance(data, dict) and isinstance(data.get("data"), dict):
+            data = data["data"]
+        sl = data.get("super_likes") if isinstance(data, dict) else None
+        if isinstance(sl, dict) and isinstance(sl.get("remaining"), int):
+            self.super_likes_remaining = int(sl["remaining"])
 
     # ---- navigation / state -----------------------------------------------------------
     def goto_recs(self) -> None:
@@ -293,6 +337,79 @@ class TinderPage:
     def nope(self) -> bool:
         return self._press("nope", "ArrowLeft")
 
+    def _dialog_text(self) -> str:
+        try:
+            return (self.page.evaluate(
+                "() => Array.from(document.querySelectorAll('[role=dialog], [aria-modal=true]'))"
+                ".filter(d => d.getBoundingClientRect().height > 0).map(d => d.innerText).join('\\n')"
+            ) or "").lower()
+        except Exception:
+            return ""
+
+    @staticmethod
+    def is_super_like_upsell(text: str) -> bool:
+        t = text.lower()
+        if any(h in t for h in SUPERLIKE_UPSELL_TEXTS):
+            return True
+        # generic: a dialog about Super Likes that quotes a price is a shop, not a confirmation
+        return "super like" in t and re.search(r"[$€£]\s?\d|\d\s?[$€£]", t) is not None
+
+    def _button_by_text(self, texts: list[str]):
+        """First *visible* button whose accessible name is one of ``texts`` (hidden duplicates are common)."""
+        for text in texts:
+            try:
+                loc = self.page.get_by_role("button", name=re.compile(rf"^\s*{re.escape(text)}\s*$", re.IGNORECASE))
+                for i in range(min(loc.count(), 8)):
+                    if loc.nth(i).is_visible():
+                        return loc.nth(i)
+            except Exception:
+                continue
+        return None
+
+    def type_like_human(self, text: str) -> None:
+        for ch in text:
+            self.page.keyboard.type(ch)
+            self._sleep(lognormal_delay(0.04, 0.18, self.rng))
+
+    def super_like(self, note: str | None = None) -> str:
+        """Press Super Like, then handle whatever Tinder shows next.
+
+        Returns ``'sent'`` (plain Super Like), ``'sent_note'`` (Super Like with the note),
+        ``'unavailable'`` (Tinder offered to sell Super Likes instead; the upsell was dismissed and
+        nothing was sent) or ``'failed'`` (the control could not be pressed). The caller still has
+        to confirm the card advanced, exactly as for like/nope.
+        """
+        if not self._press("super_like", "Enter"):
+            return "failed"
+        self._sleep(lognormal_delay(0.8, 1.8, self.rng))
+        text = self._dialog_text()
+        if text and self.is_super_like_upsell(text):
+            self.dismiss_popups()
+            return "unavailable"
+        box = self._first("note_input")
+        if box is None:
+            return "sent"
+        typed = False
+        if note:
+            try:
+                self.mouse.click(box)
+                self._sleep(lognormal_delay(0.3, 0.9, self.rng))
+                self.type_like_human(note)
+                typed = True
+                self._sleep(lognormal_delay(0.5, 1.5, self.rng))
+            except Exception:
+                typed = False
+        send = self._button_by_text(NOTE_SEND_TEXTS)
+        if send is None:
+            return "failed"
+        self.mouse.click(send)
+        self._sleep(lognormal_delay(0.8, 1.6, self.rng))
+        text = self._dialog_text()
+        if text and self.is_super_like_upsell(text):
+            self.dismiss_popups()
+            return "unavailable"
+        return "sent_note" if typed else "sent"
+
     # ---- popups ---------------------------------------------------------------------------
     def dismiss_popups(self) -> list[str]:
         handled: list[str] = []
@@ -306,12 +423,13 @@ class TinderPage:
             except Exception:
                 continue
         for text in POPUP_DISMISS_TEXTS:
+            loc = self._button_by_text([text])
+            if loc is None:
+                continue
             try:
-                loc = self.page.get_by_role("button", name=re.compile(rf"^\s*{re.escape(text)}\s*$", re.IGNORECASE)).first
-                if loc.count() and loc.is_visible():
-                    self.mouse.click(loc)
-                    handled.append(text)
-                    time.sleep(lognormal_delay(0.4, 1.0, self.rng))
+                self.mouse.click(loc)
+                handled.append(text)
+                time.sleep(lognormal_delay(0.4, 1.0, self.rng))
             except Exception:
                 continue
         return handled

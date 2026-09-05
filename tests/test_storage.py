@@ -47,10 +47,30 @@ def test_reference_vectors_and_profile_vectors(storage: Storage):
     storage.put_embedding("u_1", "clip", np.array([1, 0], np.float32), "c")
     storage.put_embedding("u_2", "clip", np.array([0, 1], np.float32), "c")
     storage.add_decision("u", "like", 0.8, "auto")
-    m = storage.liked_profile_vectors("clip", 1)
-    assert m.shape == (1, 2) and np.allclose(m[0], [0.5, 0.5])
+    ids, m = storage.labelled_profile_vectors("clip", 1)
+    assert ids == ["u"] and m.shape == (1, 2) and np.allclose(m[0], [0.5, 0.5])
+    ids0, m0 = storage.labelled_profile_vectors("clip", 0)
+    assert ids0 == [] and m0.size == 0
     storage.clear_references("liked")
     assert storage.references("liked", "face").size == 0
+
+
+def test_face_reference_is_the_primary_face(storage: Storage):
+    """Only the largest face per photo counts, and the recurring person wins over a one-off friend."""
+    storage.upsert_profile(ProfileRecord(id="u"))
+    for i in range(3):
+        storage.upsert_photo(f"u_{i}", "u", "", None, position=i)
+    person = np.array([1, 0, 0], np.float32)
+    friend = np.array([0, 1, 0], np.float32)
+    storage.put_embedding("u_0", "face", person, "m", idx=0)
+    storage.put_embedding("u_0", "face", friend, "m", idx=1)          # friend in a group shot: ignored
+    storage.put_embedding("u_1", "face", person * 0.9, "m", idx=0)
+    storage.put_embedding("u_2", "face", np.array([0, 0, 1], np.float32), "m", idx=0)  # odd one out
+    storage.add_decision("u", "superlike", 0.99, "auto")            # superlike labels as a like
+    ids, m = storage.labelled_profile_vectors("face", 1)
+    assert ids == ["u"] and m.shape == (1, 3)
+    assert np.allclose(m[0] / np.linalg.norm(m[0]), person)
+    assert storage.summary()["superliked"] == 1 and storage.summary()["liked"] == 1
 
 
 def test_events_and_meta(storage: Storage):

@@ -1,5 +1,7 @@
 """End-to-end likeness pipeline on the synthetic models (no downloads)."""
 
+import pickle
+
 import numpy as np
 
 from tests.conftest import encode_jpeg, make_image
@@ -37,6 +39,7 @@ def test_enroll_and_features_and_verdict(cfg: Config, storage, models, tmp_path)
 
     ex = FeatureExtractor(cfg, models, storage)
     assert ex.reference_summary() == {"liked_faces": 3, "disliked_faces": 3, "liked_clip": 3, "disliked_clip": 3}
+    assert ex._pool_ids["liked_faces"] == [None] * 3  # enrolled images belong to no profile
 
     red = ProfileRecord(id="red", name="R", age=30, bio="I love hiking", photo_urls=["u1", "u2"])
     blue = ProfileRecord(id="blue", name="B", age=30, photo_urls=["u3"])
@@ -131,3 +134,93 @@ def test_uncertain_band(cfg: Config, storage):
 def test_keyword_hits():
     assert keyword_hits("I like Hiking and climbing!", ["hiking", "climb", "climbing"]) == 2
     assert keyword_hits("", ["x"]) == 0
+
+
+def _profile_with_photos(ex: FeatureExtractor, pid: str, colour: tuple[int, int, int], seed: int, n: int = 2):
+    prof = ProfileRecord(id=pid, name=pid.title(), age=27, photo_urls=[f"u_{pid}_{i}" for i in range(n)])
+    imgs = [encode_jpeg(make_image(colour, noise=8, seed=seed + i)) for i in range(n)]
+    return prof, ex.analyse_profile(prof, imgs)
+
+
+def test_retrain_recomputes_features_leave_one_out(cfg: Config, storage, models):
+    """Training features are rebuilt from the stored embeddings against the current pools, and a
+    profile never sees its own vectors in the pool it is scored against."""
+    ex = FeatureExtractor(cfg, models, storage)
+    assert ex.reference_summary() == {"liked_faces": 0, "disliked_faces": 0, "liked_clip": 0, "disliked_clip": 0}
+    stale = {k: 0.0 for k in FEATURE_KEYS}
+    for i in range(4):
+        prof, _ = _profile_with_photos(ex, f"red{i}", (200, 40, 40), seed=10 * i)
+        storage.add_decision(prof.id, "like", 0.5, "manual", ["shadow"], stale, label=1)   # features stored: all zero
+    for i in range(4):
+        prof, _ = _profile_with_photos(ex, f"blue{i}", (40, 40, 200), seed=100 + 10 * i)
+        storage.add_decision(prof.id, "nope", 0.5, "manual", ["shadow"], stale, label=0)
+    ex.refresh_references()
+    assert ex.reference_summary() == {"liked_faces": 4, "disliked_faces": 4, "liked_clip": 4, "disliked_clip": 4}
+    assert ex._pool("liked_faces", "red0").shape == (3, 512) and ex._pool("liked_faces", "zzz").shape == (4, 512)
+    assert ex._pool("disliked_faces", "red0").shape == (4, 512)
+
+    a = ex.analysis_from_storage("red0")
+    assert a is not None and len(a.photos) == 2 and all(len(ph.faces) == 1 and ph.clip is not None for ph in a.photos)
+    with_self = ex.features(a)
+    loo = ex.features(a, exclude_profile_id="red0")
+    assert with_self["primary_face_sim_liked"] > 0.999          # its own vector is in the pool
+    assert loo["primary_face_sim_liked"] < with_self["primary_face_sim_liked"]
+    assert loo["face_knn_liked_frac"] > 0.5 > ex.features(ex.analysis_from_storage("blue1"), "blue1")["face_knn_liked_frac"]
+    assert ex.analysis_from_storage("nobody") is None
+
+    cfg.likeness.learning.min_examples = 4
+    cfg.likeness.learning.blend_full_at = 8
+    sc = Scorer(cfg, storage, extractor=ex)
+    X, y, recomputed = sc.training_matrix()
+    assert X.shape == (8, len(FEATURE_KEYS)) and recomputed == 8 and sorted(y.tolist()) == [0] * 4 + [1] * 4
+    assert np.abs(X).sum() > 0                                   # the zero features on disk were not used
+    assert sc.retrain() == 8 and sc.model is not None
+    red = sc.decide(ProfileRecord(id="new", age=27), loo)
+    blue = sc.decide(ProfileRecord(id="new", age=27), ex.features(ex.analysis_from_storage("blue1"), "blue1"))
+    assert red.learned > 0.5 > blue.learned
+
+
+def test_stale_model_file_is_discarded(cfg: Config, storage):
+    path = cfg.models_path / "likeness_lr.pkl"
+    with open(path, "wb") as fh:
+        pickle.dump({"model": object(), "n": 99, "keys": ["some", "old", "layout"]}, fh)
+    sc = Scorer(cfg, storage)
+    assert sc.model is None and sc.stale and sc.learned_weight() == 0.0
+    assert sc.retrain() == 0 and not sc.stale                     # nothing to train on yet: prior only
+
+
+def test_distance_is_log_compressed_for_the_learned_model():
+    f = {k: 0.0 for k in FEATURE_KEYS}
+    f["distance_km"] = 10000.0
+    v = Scorer._vec(f)
+    assert 9 < v[FEATURE_KEYS.index("distance_km")] < 10
+
+
+def test_crush_flags(cfg: Config, storage):
+    cfg.likeness.learning.min_examples = 20
+    cfg.likeness.learning.blend_full_at = 40
+    sc = Scorer(cfg, storage)
+    rng = np.random.default_rng(1)
+    for i in range(60):
+        storage.upsert_profile(ProfileRecord(id=f"p{i}"))
+        like = i % 2 == 0
+        feats = {k: float(rng.normal(0, 0.05)) for k in FEATURE_KEYS}
+        feats.update(face_margin=0.3 if like else -0.3, primary_face_knn_liked_frac=0.9 if like else 0.1, photo_count=3)
+        storage.add_decision(f"p{i}", "like" if like else "nope", 0.5, "manual", [], feats, label=int(like))
+    assert sc.retrain() == 60
+    strong = {k: 0.0 for k in FEATURE_KEYS}
+    strong.update(face_margin=0.5, primary_face_knn_liked_frac=1.0, photo_count=3)
+    v = sc.decide(ProfileRecord(id="q", age=30), strong)
+    assert v.like and v.score > 0.95 and v.crush and v.super_crush and "super crush" in v.reasons
+    cfg.crush.message_threshold = 1.01
+    v = sc.decide(ProfileRecord(id="q", age=30), strong)
+    assert v.crush and not v.super_crush and "crush" in v.reasons
+    cfg.crush.enabled = False
+    assert not sc.decide(ProfileRecord(id="q", age=30), strong).crush
+    # without a learned model the prior alone never earns a Super Like (require_learned)
+    cfg.crush.enabled = True
+    sc.model = None
+    v = sc.decide(ProfileRecord(id="q", age=30), strong)
+    assert v.learned is None and not v.crush
+    cfg.crush.require_learned = False
+    assert sc.decide(ProfileRecord(id="q", age=30), strong).crush == (sc.decide(ProfileRecord(id="q", age=30), strong).score >= 0.9)

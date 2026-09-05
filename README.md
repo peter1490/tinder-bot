@@ -23,7 +23,7 @@ Chrome (persistent profile, Patchright) ──► tinder.com/app/recs
         │  DOM fallback ([itemprop=name]/[itemprop=age], background-image urls)
         ▼
 photos ─► SCRFD ─► ArcFace 512-d  ─┐
-       ─► CLIP ViT-B/32 512-d      ├─► features (26) ─► prior (weights) ⊕ learned (logistic) ─► LIKE / NOPE
+       ─► CLIP ViT-B/32 512-d      ├─► features (27) ─► prior (weights) ⊕ learned (logistic) ─► NOPE / LIKE / SUPER LIKE
        ─► blur / face-size / group ┘        ▲
                                             └── reference sets: img/accepted, img/denied, facedir/known_faces,
                                                 and every profile you already labelled
@@ -61,7 +61,7 @@ tinderbot swipe --loop                   # sessions with breaks until the daily 
 tinderbot auto                           # FULLY UNATTENDED: random sessions per day, browser closed in between
 tinderbot plan / status / resume         # see the day plan, the halt/pause state, clear a halt
 tinderbot review                         # confirm/correct uncertain auto decisions (training labels)
-tinderbot retrain                        # refit the learned model
+tinderbot retrain                        # refit the learned model (features recomputed against today's pools)
 tinderbot web                            # small local web app: browse photos, fix labels, delete profiles
 tinderbot stats / export
 ```
@@ -104,11 +104,11 @@ do not swipe on the phone while a session is running.
 
 ## Likeness scoring
 
-Per profile the extractor computes 26 features (`tinderbot/likeness/features.py`), among them:
+Per profile the extractor computes 27 features (`tinderbot/likeness/features.py`), among them:
 
 | group | features | meaning |
 |---|---|---|
-| identity | `primary_face_sim_liked/disliked`, `face_sim_liked_max/top3`, `face_knn_liked_frac`, `face_margin` | ArcFace cosine similarity of the profile's *primary face* (the face recurring across photos, so friends in group shots don't count) against your liked / disliked reference faces, plus a k-NN vote |
+| identity | `primary_face_sim_liked/disliked`, `primary_face_knn_liked_frac`, `face_sim_liked_max/top3`, `face_knn_liked_frac`, `face_margin` | ArcFace cosine similarity of the profile's *primary face* (the face recurring across photos, so friends in group shots don't count) against your liked / disliked reference faces, plus a k-NN vote (k grows with the pool, 7-25) |
 | style | `clip_sim_liked_mean/max`, `clip_sim_disliked_max`, `clip_knn_liked_frac`, `clip_margin` | CLIP whole-photo similarity to photos you liked/disliked (setting, style, vibe) |
 | taste hints | `prompt_score` | mean similarity to your `positive` prompts minus `negative` prompts (zero-shot CLIP) |
 | quality | `quality_mean/max` (Laplacian sharpness), `face_photo_ratio`, `group_photo_ratio`, `no_face_ratio`, `face_size_mean`, `identity_consistency` | photo hygiene and "is this actually one person" |
@@ -117,14 +117,32 @@ Per profile the extractor computes 26 features (`tinderbot/likeness/features.py`
 Decision (`tinderbot/likeness/scorer.py`):
 
 1. **Hard filters** – age range, max distance, verified-only, blocked bio keywords, "no detectable face".
-2. **Prior** – weighted logit of the features (weights in `config.toml`), calibrated so ArcFace ≈0.30 and
-   CLIP ≈0.60 are neutral. Works from the first swipe with only your reference folders.
+2. **Prior** – weighted logit of the features (weights in `config.toml`). With both a liked and a disliked
+   pool it scores the *margin* (similarity to liked minus similarity to disliked) and the k-NN votes, which
+   stay comparable as the pools grow; with a single pool it uses the absolute similarity, calibrated so
+   ArcFace ≈0.30 and CLIP ≈0.60 are neutral. Works from the first swipe with only your reference folders.
 3. **Learned model** – `StandardScaler + LogisticRegression` on the same features, trained from every
    labelled decision (shadow-mode swipes, `review`, auto decisions). Blended in with a weight that ramps
-   from `min_examples` to `blend_full_at`; retrained every `retrain_every` decisions.
+   from `min_examples` to `blend_full_at`; retrained every `retrain_every` decisions. At every retrain the
+   features of *all* training examples are recomputed from the stored embeddings against the current
+   reference pools, leaving each profile's own vectors out (leave-one-out), so an example scored when the
+   pools were tiny is described the same way as one scored today. The fit is unweighted on purpose: the
+   output is read as a probability by the thresholds below.
 4. Scores within `uncertain_band` of the threshold are flagged for `tinderbot review`.
 
-Reference sets grow automatically: every labelled profile's embeddings join the liked/disliked pools.
+Reference sets grow automatically: every labelled profile joins the liked/disliked pools (its *primary
+face* and its mean CLIP vector), and the pools are refreshed at every retrain.
+
+### Crushes: Super Likes and notes
+
+`[crush]` in `config.toml`: a profile whose final probability reaches `super_like_threshold` (0.9) is a
+**crush** and gets the day's Super Like; one that also reaches `message_threshold` (0.95) is a **super
+crush** and gets the Super Like *with a note* (Tinder's only way to message before matching; templates in
+`messages`, `{name}` is filled in). Both are rationed per local day (`max_super_likes_per_day`,
+`max_messages_per_day`, default 1 each); when Tinder shows the Super Like shop instead of sending, the bot
+dismisses it, sends a normal like and stops trying until the next day. It also reads the
+`super_likes.remaining` counter from Tinder's own like responses and never attempts when it is 0.
+`require_learned` (default on) means the hand-tuned prior alone never earns a Super Like.
 
 ## Managing the database (`tinderbot web`)
 
@@ -183,7 +201,7 @@ the like/nope actions already fall back to Tinder's keyboard shortcuts (← / �
 ## Development
 
 ```bash
-pytest -q          # 64 tests: storage, recs parsing, humanised paths, SCRFD decoding, likeness pipeline
+pytest -q          # 77 tests: storage, recs parsing, humanised paths, SCRFD decoding, likeness pipeline
                    # on synthetic ONNX models, page driver + captcha policy on a mock Tinder page (Chromium),
                    # pacing/like governor, day planner + unattended scheduler on a simulated clock
 ```

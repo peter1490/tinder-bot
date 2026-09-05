@@ -10,6 +10,7 @@
   .gamepad button { width: 64px; height: 64px; border-radius: 50%; }
   .Hidden { position: absolute; left: -9999px; }
   #dialog { position: fixed; top: 100px; left: 100px; background: #eee; padding: 20px; display: none; }
+  .modal { position: fixed; top: 140px; left: 120px; background: #ddd; padding: 20px; display: none; }
   #captcha { display: none; }
 </style>
 </head>
@@ -21,7 +22,18 @@
     <div class="gamepad">
       <button aria-label="Nope" id="nope"><span class="Hidden">Nope</span>X</button>
       <button aria-label="Like" id="like"><span class="Hidden">Like</span>&hearts;</button>
+      <button aria-label="Super Like" id="superlike"><span class="Hidden">Super Like</span>&#9733;</button>
     </div>
+  </div>
+  <div id="note" role="dialog" class="modal">
+    <p>Add a note to your Super Like</p>
+    <textarea placeholder="Add a note" rows="3"></textarea>
+    <button id="sendsuper">Send Super Like</button>
+  </div>
+  <div id="upsell" role="dialog" class="modal">
+    <p>You're out of Super Likes. Get more Super Likes from $4.99</p>
+    <button id="upsellbuy">Get Super Likes</button>
+    <button id="upsellclose">No Thanks</button>
   </div>
   <div id="dialog" role="dialog">
     <p>Get Tinder Gold to see who likes you</p>
@@ -54,6 +66,23 @@
     if (window.actions.length === 2) document.getElementById('dialog').style.display = 'block';
   }
   document.getElementById('like').addEventListener('click', () => advance('like'));
+  window.notes = [];
+  window.superLikesLeft = 1;
+  function superLike() {
+    if (window.superLikesLeft <= 0) { document.getElementById('upsell').style.display = 'block'; return; }
+    document.getElementById('note').style.display = 'block';
+  }
+  document.getElementById('superlike').addEventListener('click', superLike);
+  document.getElementById('sendsuper').addEventListener('click', () => {
+    const ta = document.querySelector('#note textarea');
+    window.notes.push(ta.value); ta.value = '';
+    window.superLikesLeft--;
+    document.getElementById('note').style.display = 'none';
+    advance('superlike');
+  });
+  document.getElementById('upsellclose').addEventListener('click', () => {
+    window.actions.push('dismiss'); document.getElementById('upsell').style.display = 'none';
+  });
   document.getElementById('nope').addEventListener('click', () => advance('nope'));
   document.getElementById('nothanks').addEventListener('click', () => {
     window.actions.push('dismiss'); document.getElementById('dialog').style.display = 'none';
@@ -61,6 +90,7 @@
   document.addEventListener('keydown', (e) => {
     if (e.key === 'ArrowRight') advance('like');
     if (e.key === 'ArrowLeft') advance('nope');
+    if (e.key === 'Enter' && e.target.tagName !== 'TEXTAREA') superLike();
     if (e.key === ' ') window.actions.push('photo');
   });
   window.showCaptcha = () => { document.getElementById('captcha').style.display = 'block'; };

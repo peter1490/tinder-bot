@@ -2,6 +2,8 @@ import random
 
 from tinderbot.browser.recs import RecsQueue
 from tinderbot.browser.tinder_page import CardInfo
+from tinderbot.config import CrushConfig
+from tinderbot.crush import CrushPolicy
 from tinderbot.likeness.scorer import Verdict
 from tinderbot.runner import Runner, RunStats
 from tinderbot.storage import ProfileRecord
@@ -61,6 +63,7 @@ class StuckPage:
         self.queue = RecsQueue()
         self.waited_for = None
         self.clicks = 0
+        self.super_likes_remaining = None
 
     def dismiss_popups(self):
         return []
@@ -101,6 +104,7 @@ def test_unconfirmed_swipe_is_not_counted_or_persisted(monkeypatch):
     runner.pacer = FakePacer()
     runner.governor = FakeGovernor()
     runner.scorer = FakeScorer()
+    runner.crush = CrushPolicy(CrushConfig(), runner.storage)
     runner._check_challenge = lambda tp, unattended=False: "ok"
     runner.resolve_profile = lambda tp, card: ProfileRecord(id="ana", name="Ana", age=25)
     runner.score_profile = lambda tp, profile: (
@@ -155,6 +159,7 @@ def _bare_runner(monkeypatch, governor):
     runner.pacer = FakePacer()
     runner.governor = governor
     runner.scorer = FakeScorer()
+    runner.crush = CrushPolicy(CrushConfig(), runner.storage)
     runner._check_challenge = lambda tp, unattended=False: "ok"
     runner.resolve_profile = lambda tp, card: ProfileRecord(id=card.name.lower(), name=card.name, age=25)
     runner.score_profile = lambda tp, profile: (Verdict(like=True, score=0.8, prior=0.8, learned=None), {"s": 0.8})
@@ -237,3 +242,106 @@ def test_run_session_reports_reason_and_closes_browser(monkeypatch, cfg, storage
     runner._ensure_logged_in = lambda tp, wait_minutes=0.0: False
     res = runner.run_session(10)
     assert res.reason == "needs_login" and res.halting
+
+
+class QuietMouse:
+    def wiggle(self):
+        pass
+
+
+class CrushPage(StuckPage):
+    """Advances on every action; Super Like either works (recording the note) or shows the upsell."""
+
+    def __init__(self, mode="ok"):
+        super().__init__()
+        self.mouse = QuietMouse()
+        self.mode = mode
+        self.super_likes = []
+        self.n = 0
+
+    def current_card(self):
+        return CardInfo(f"P{self.n}", 25, [f"https://example.test/{self.n}.jpg"])
+
+    def super_like(self, note=None):
+        if self.mode == "unavailable":
+            return "unavailable"
+        self.super_likes.append(note)
+        return "sent_note" if note else "sent"
+
+    def wait_for_new_card(self, previous_key, timeout_s):
+        self.n += 1
+        return self.current_card()
+
+
+def _crush_runner(storage, page, scores, monkeypatch):
+    runner = Runner.__new__(Runner)
+    runner.stats = RunStats()
+    runner.rng = random.Random(0)
+    runner.storage = storage
+    runner.pacer = FakePacer()
+    runner.governor = FakeGovernor()
+    runner.scorer = FakeScorer()
+    runner.crush = CrushPolicy(CrushConfig(messages=["Hey {name}, hi!"]), storage, random.Random(0))
+    runner._check_challenge = lambda tp, unattended=False: "ok"
+
+    def resolve(tp, card):
+        p = ProfileRecord(id=card.name.lower(), name=card.name, age=25)
+        storage.upsert_profile(p)
+        return p
+
+    def score(tp, profile):
+        s = scores[int(profile.id[1:])]
+        return Verdict(like=s >= 0.55, score=s, prior=s, learned=s, crush=s >= 0.9, super_crush=s >= 0.95), {"s": s}
+
+    runner.resolve_profile = resolve
+    runner.score_profile = score
+    monkeypatch.setattr("tinderbot.runner.time.sleep", lambda seconds: None)
+    return runner
+
+
+def test_one_super_like_and_one_note_per_day(storage, monkeypatch):
+    page = CrushPage()
+    runner = _crush_runner(storage, page, [0.97, 0.99, 0.92, 0.3], monkeypatch)
+    assert runner._swipe_session(page, 4) == 4
+    # first super crush: Super Like + note; the next crushes of the day are plain likes
+    assert page.super_likes == ["Hey P0, hi!"]
+    actions = [storage.decisions_for_profile(f"p{i}")[0]["action"] for i in range(4)]
+    assert actions == ["superlike", "like", "like", "nope"]
+    assert storage.count_events("superlike", 0) == 1 and storage.count_events("crush_message", 0) == 1
+    assert (runner.stats.liked, runner.stats.super_liked, runner.stats.notes, runner.stats.noped) == (3, 1, 1, 1)
+    assert runner.crush.plan(Verdict(like=True, score=0.99, prior=0.99, learned=0.99, crush=True, super_crush=True)) is None
+
+
+def test_crush_without_note_budget_still_gets_the_super_like(storage, monkeypatch):
+    page = CrushPage()
+    storage.log_event("crush_message", {"profile_id": "earlier"})     # today's note already used
+    runner = _crush_runner(storage, page, [0.99, 0.91], monkeypatch)
+    assert runner._swipe_session(page, 2) == 2
+    assert page.super_likes == [None]
+    assert storage.decisions_for_profile("p0")[0]["action"] == "superlike"
+    assert storage.decisions_for_profile("p1")[0]["action"] == "like"
+    assert storage.count_events("crush_message", 0) == 1
+
+
+def test_super_like_unavailable_falls_back_to_like_for_the_day(storage, monkeypatch):
+    page = CrushPage(mode="unavailable")
+    runner = _crush_runner(storage, page, [0.99, 0.99], monkeypatch)
+    assert runner._swipe_session(page, 2) == 2
+    assert page.clicks == 2 and page.super_likes == []
+    assert [storage.decisions_for_profile(f"p{i}")[0]["action"] for i in range(2)] == ["like", "like"]
+    assert storage.count_events("superlike", 0) == 0
+    assert runner.crush.unavailable_today() and not runner.crush.can_super_like()
+
+
+def test_tinder_reported_balance_blocks_the_attempt(storage, monkeypatch):
+    page = CrushPage()
+    page.super_likes_remaining = 0
+    runner = _crush_runner(storage, page, [0.99], monkeypatch)
+    assert runner._swipe_session(page, 1) == 1
+    assert page.super_likes == [] and storage.decisions_for_profile("p0")[0]["action"] == "like"
+
+
+def test_note_templates():
+    policy = CrushPolicy(CrushConfig(messages=["Hi {name}! Coffee?"]), None, random.Random(0))
+    assert policy.note_for(ProfileRecord(id="x", name="Ana Maria")) == "Hi Ana! Coffee?"
+    assert policy.note_for(ProfileRecord(id="x", name="")) == "Hi! Coffee?"
