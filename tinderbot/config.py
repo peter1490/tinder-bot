@@ -184,6 +184,29 @@ class LikenessConfig(BaseModel):
     learning: Learning = Field(default_factory=Learning)
 
 
+class CrushConfig(BaseModel):
+    """Super Likes for "crushes" and a Super Like note for "super crushes", both rationed per day."""
+
+    enabled: bool = True
+    super_like_threshold: float = 0.9      # final probability above which a profile is a crush
+    message_threshold: float = 0.95        # ... and a super crush (Super Like sent with a note)
+    max_super_likes_per_day: int = 1
+    max_messages_per_day: int = 1
+    require_learned: bool = True           # never spend a Super Like on the hand-tuned prior alone
+    messages: list[str] = Field(default_factory=lambda: [
+        "Hey {name}! Your profile really stood out, I would love to hear more about you.",
+        "Hi {name} :) Something about your photos made me smile. Coffee sometime?",
+    ])
+
+    @field_validator("messages")
+    @classmethod
+    def _short_notes(cls, v: list[str]) -> list[str]:
+        for m in v:
+            if len(m) > 140:
+                raise ValueError("Super Like notes are limited to 140 characters")
+        return v
+
+
 class ModelsConfig(BaseModel):
     face_detector: str = "buffalo_l/det_10g"
     face_recognizer: str = "buffalo_l/w600k_r50"
@@ -198,6 +221,7 @@ class Config(BaseModel):
     schedule: ScheduleConfig = Field(default_factory=ScheduleConfig)
     captcha: CaptchaConfig = Field(default_factory=CaptchaConfig)
     likeness: LikenessConfig = Field(default_factory=LikenessConfig)
+    crush: CrushConfig = Field(default_factory=CrushConfig)
     models: ModelsConfig = Field(default_factory=ModelsConfig)
 
     # ---- derived paths -------------------------------------------------

@@ -105,3 +105,42 @@ def test_captcha_detection_and_policy(page, storage):
 def test_out_of_likes_false_on_normal_card(page):
     tp = TinderPage(page)
     assert tp.out_of_likes() is False
+
+
+def test_super_like_with_note_then_upsell(page):
+    tp = TinderPage(page, random.Random(2))
+    tp.mouse._sleep = lambda s: None
+    tp._sleep = lambda s: None
+    page.evaluate("window.actions = []; window.notes = []; window.superLikesLeft = 1")
+    key = tp.current_card().key
+    assert tp.super_like("Hi there :)") == "sent_note"
+    assert page.evaluate("window.notes") == ["Hi there :)"]
+    assert page.evaluate("window.actions")[-1] == "superlike"
+    assert tp.wait_for_new_card(key, timeout_s=3) is not None
+    # the daily Super Like is gone: Tinder shows the shop instead -> dismissed, nothing sent
+    assert tp.super_like("again") == "unavailable"
+    assert page.evaluate("window.actions")[-1] == "dismiss"
+    assert page.locator("#upsell").is_visible() is False
+    assert page.evaluate("window.notes") == ["Hi there :)"]
+    # no note: the composer is submitted empty (plain Super Like)
+    page.evaluate("window.superLikesLeft = 1")
+    assert tp.super_like(None) == "sent"
+    assert page.evaluate("window.notes") == ["Hi there :)", ""]
+
+
+def test_super_like_upsell_wording():
+    assert TinderPage.is_super_like_upsell("You're out of Super Likes")
+    assert TinderPage.is_super_like_upsell("Super Like\n3 for €6.99")
+    assert not TinderPage.is_super_like_upsell("Add a note to your Super Like")
+    assert not TinderPage.is_super_like_upsell("Get Tinder Gold to see who likes you")
+
+
+def test_super_like_balance_is_read_from_tinder_responses(page):
+    tp = TinderPage(page)
+    assert tp.super_likes_remaining is None
+    tp._observe_super_like_balance('{"match": false, "likes_remaining": 100, "super_likes": {"remaining": 0, "allotment": 1}}')
+    assert tp.super_likes_remaining == 0
+    tp._observe_super_like_balance('{"data": {"super_likes": {"remaining": 2}}}')
+    assert tp.super_likes_remaining == 2
+    tp._observe_super_like_balance("not json")
+    assert tp.super_likes_remaining == 2

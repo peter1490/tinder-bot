@@ -115,6 +115,22 @@ min_examples = 40            # below this only the prior is used
 blend_full_at = 300          # learned model weight ramps 0->1 between min_examples and this
 retrain_every = 25           # decisions
 
+# Super Likes for "crushes" and a Super Like note for "super crushes" (Tinder's only way to message
+# before matching). Each is rationed per local day; once Tinder shows the Super Like shop instead of
+# sending, the bot stops trying until tomorrow. Probabilities are the final blended score.
+[crush]
+enabled = true
+super_like_threshold = 0.9   # p >= this -> crush -> today's Super Like
+message_threshold = 0.95     # p >= this -> super crush -> Super Like with a note (uses both rations)
+max_super_likes_per_day = 1
+max_messages_per_day = 1
+require_learned = true       # never spend a Super Like while only the hand-tuned prior is scoring
+# {name} is replaced by the first name; notes are limited to 140 characters
+messages = [
+  "Hey {name}! Your profile really stood out, I would love to hear more about you.",
+  "Hi {name} :) Something about your photos made me smile. Coffee sometime?",
+]
+
 [models]
 # All models run locally through onnxruntime. They are downloaded once into data/models.
 face_detector = "buffalo_l/det_10g"

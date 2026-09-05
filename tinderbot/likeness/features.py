@@ -13,6 +13,8 @@ friend in a group photo does not drive the score. All reference vectors come fro
 from __future__ import annotations
 
 import hashlib
+import json
+import math
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -23,17 +25,19 @@ from ..config import Config
 from ..models.face import Face, cosine_matrix
 from ..models.image_utils import blur_score, load_bgr
 from ..models.loader import Models
-from ..storage import ProfileRecord, Storage
+from ..storage import ProfileRecord, Storage, from_blob
 
 FEATURE_KEYS = [
     "face_sim_liked_max", "face_sim_liked_top3", "face_sim_disliked_max", "face_margin",
-    "face_knn_liked_frac", "primary_face_sim_liked", "primary_face_sim_disliked",
+    "face_knn_liked_frac", "primary_face_sim_liked", "primary_face_sim_disliked", "primary_face_knn_liked_frac",
     "clip_sim_liked_max", "clip_sim_liked_mean", "clip_sim_disliked_max", "clip_margin", "clip_knn_liked_frac",
     "prompt_score",
     "quality_mean", "quality_max", "face_photo_ratio", "group_photo_ratio", "no_face_ratio",
     "face_size_mean", "identity_consistency",
     "photo_count", "bio_len", "bio_keyword_hits", "verified", "age", "distance_km",
 ]
+
+POOLS = ("liked_faces", "disliked_faces", "liked_clip", "disliked_clip")
 
 
 @dataclass
@@ -93,30 +97,41 @@ class FeatureExtractor:
         self.disliked_faces = np.zeros((0, 0), np.float32)
         self.liked_clip = np.zeros((0, 0), np.float32)
         self.disliked_clip = np.zeros((0, 0), np.float32)
+        # profile id that contributed each pool row (None for enrolled folder images), aligned with the rows
+        self._pool_ids: dict[str, list[str | None]] = {name: [] for name in POOLS}
         self._pos_prompts: np.ndarray | None = None
         self._neg_prompts: np.ndarray | None = None
         self.refresh_references()
 
     # ---- references ---------------------------------------------------------------
     def refresh_references(self) -> None:
-        """Reference sets = enrolled folders + every profile you already labelled (auto or manual)."""
-        def stack(*parts: np.ndarray) -> np.ndarray:
-            parts = [p for p in parts if p.size]
-            return np.concatenate(parts) if parts else np.zeros((0, 0), np.float32)
+        """Reference sets = enrolled folders + every profile you already labelled (auto or manual).
 
+        Call it again after new labels arrive (the runner does so at every retrain): the pools are
+        loaded once and otherwise stay frozen for the life of the extractor.
+        """
         st = self.storage
-        self.liked_faces = stack(st.references("liked", "face"), st.liked_profile_vectors("face", 1))
-        self.disliked_faces = stack(st.references("disliked", "face"), st.liked_profile_vectors("face", 0))
-        self.liked_clip = stack(st.references("liked", "clip"), st.liked_profile_vectors("clip", 1))
-        self.disliked_clip = stack(st.references("disliked", "clip"), st.liked_profile_vectors("clip", 0))
+        for name, label_word, kind, label in (("liked_faces", "liked", "face", 1),
+                                              ("disliked_faces", "disliked", "face", 0),
+                                              ("liked_clip", "liked", "clip", 1),
+                                              ("disliked_clip", "disliked", "clip", 0)):
+            enrolled = st.references(label_word, kind)
+            ids, labelled = st.labelled_profile_vectors(kind, label)
+            parts = [p for p in (enrolled, labelled) if p.size]
+            matrix = np.concatenate(parts) if parts else np.zeros((0, 0), np.float32)
+            setattr(self, name, matrix)
+            self._pool_ids[name] = [None] * (enrolled.shape[0] if enrolled.size else 0) + list(ids)
+
+    def _pool(self, name: str, exclude: str | None) -> np.ndarray:
+        """A reference pool, optionally without the rows a given profile contributed (leave-one-out)."""
+        m: np.ndarray = getattr(self, name)
+        if exclude is None or not m.size or exclude not in self._pool_ids[name]:
+            return m
+        keep = np.array([pid != exclude for pid in self._pool_ids[name]], dtype=bool)
+        return m[keep] if keep.any() else np.zeros((0, 0), np.float32)
 
     def reference_summary(self) -> dict[str, int]:
-        return {
-            "liked_faces": int(self.liked_faces.shape[0]) if self.liked_faces.size else 0,
-            "disliked_faces": int(self.disliked_faces.shape[0]) if self.disliked_faces.size else 0,
-            "liked_clip": int(self.liked_clip.shape[0]) if self.liked_clip.size else 0,
-            "disliked_clip": int(self.disliked_clip.shape[0]) if self.disliked_clip.size else 0,
-        }
+        return {name: (int(getattr(self, name).shape[0]) if getattr(self, name).size else 0) for name in POOLS}
 
     def _prompt_vectors(self) -> tuple[np.ndarray | None, np.ndarray | None]:
         pr = self.cfg.likeness.prompts
@@ -168,39 +183,86 @@ class FeatureExtractor:
                     self.storage.put_embedding(pid, "clip", pa.clip, self.models.clip_model_name)
         return analysis
 
+    def analysis_from_storage(self, profile_id: str) -> ProfileAnalysis | None:
+        """Rebuild a :class:`ProfileAnalysis` from the embeddings stored for a profile (no model runs).
+
+        Used at retrain time to recompute every training example's features against the *current*
+        reference pools, so old examples (scored when the pools were small or empty) do not carry
+        stale feature values into the learned model.
+        """
+        profile = self.storage.profile_record(profile_id)
+        if profile is None:
+            return None
+        analysis = ProfileAnalysis(profile=profile)
+        photos: dict[str, PhotoAnalysis] = {}
+        for r in self.storage.photo_embedding_rows(profile_id):
+            pa = photos.get(r["photo_id"])
+            if pa is None:
+                pa = PhotoAnalysis(photo_id=r["photo_id"], url=r["url"] or "",
+                                   path=Path(r["local_path"]) if r["local_path"] else None,
+                                   width=int(r["width"] or 1), height=int(r["height"] or 1), faces=[], clip=None,
+                                   quality=float(r["quality"] or 0.0))
+                photos[r["photo_id"]] = pa
+                analysis.photos.append(pa)
+            if r["kind"] is None:
+                continue
+            vec = from_blob(r["vector"], r["dim"])
+            if r["kind"] == "clip":
+                pa.clip = vec
+            elif r["kind"] == "face":
+                meta = {}
+                if r["meta"]:
+                    try:
+                        meta = json.loads(r["meta"])
+                    except ValueError:
+                        meta = {}
+                bbox = np.array(meta.get("bbox") or [0, 0, 0, 0], dtype=np.float32)
+                pa.faces.append(Face(bbox=bbox, score=float(meta.get("score", 1.0)), kps=np.zeros((5, 2), np.float32),
+                                     embedding=vec))
+        for pa in analysis.photos:
+            pa.faces.sort(key=lambda fc: -fc.area)  # largest face first, as the detector orders them
+        return analysis if analysis.photos else None
+
     # ---- features -----------------------------------------------------------------
-    def features(self, a: ProfileAnalysis) -> dict[str, float]:
+    def features(self, a: ProfileAnalysis, exclude_profile_id: str | None = None) -> dict[str, float]:
+        """Feature vector of a profile. ``exclude_profile_id`` leaves that profile's own reference
+        vectors out of every pool (leave-one-out, for recomputing training examples)."""
         f = {k: 0.0 for k in FEATURE_KEYS}
         p = a.profile
         faces = a.face_embeddings()
         clips = a.clip_embeddings()
+        liked_faces, disliked_faces = self._pool("liked_faces", exclude_profile_id), self._pool("disliked_faces", exclude_profile_id)
+        liked_clip, disliked_clip = self._pool("liked_clip", exclude_profile_id), self._pool("disliked_clip", exclude_profile_id)
 
         # identity vs. reference faces
-        if faces.size and self.liked_faces.size:
-            s = cosine_matrix(faces, self.liked_faces)
+        if faces.size and liked_faces.size:
+            s = cosine_matrix(faces, liked_faces)
             f["face_sim_liked_max"] = float(s.max())
             top = np.sort(s.ravel())[::-1][:3]
             f["face_sim_liked_top3"] = float(top.mean())
-        if faces.size and self.disliked_faces.size:
-            f["face_sim_disliked_max"] = float(cosine_matrix(faces, self.disliked_faces).max())
+        if faces.size and disliked_faces.size:
+            f["face_sim_disliked_max"] = float(cosine_matrix(faces, disliked_faces).max())
         f["face_margin"] = f["face_sim_liked_max"] - f["face_sim_disliked_max"]
-        f["face_knn_liked_frac"] = self._knn_frac(faces, self.liked_faces, self.disliked_faces, k=7)
+        f["face_knn_liked_frac"] = self._knn_frac(faces, liked_faces, disliked_faces)
         primary = a.primary_face()
         if primary is not None:
-            if self.liked_faces.size:
-                f["primary_face_sim_liked"] = float(cosine_matrix(primary[None], self.liked_faces).max())
-            if self.disliked_faces.size:
-                f["primary_face_sim_disliked"] = float(cosine_matrix(primary[None], self.disliked_faces).max())
+            if liked_faces.size:
+                f["primary_face_sim_liked"] = float(cosine_matrix(primary[None], liked_faces).max())
+            if disliked_faces.size:
+                f["primary_face_sim_disliked"] = float(cosine_matrix(primary[None], disliked_faces).max())
+            f["primary_face_knn_liked_frac"] = self._knn_frac(primary[None], liked_faces, disliked_faces)
+        else:
+            f["primary_face_knn_liked_frac"] = 0.5
 
         # whole-photo style vs. reference photos
-        if clips.size and self.liked_clip.size:
-            s = cosine_matrix(clips, self.liked_clip)
+        if clips.size and liked_clip.size:
+            s = cosine_matrix(clips, liked_clip)
             f["clip_sim_liked_max"] = float(s.max())
             f["clip_sim_liked_mean"] = float(s.max(axis=1).mean())
-        if clips.size and self.disliked_clip.size:
-            f["clip_sim_disliked_max"] = float(cosine_matrix(clips, self.disliked_clip).max())
+        if clips.size and disliked_clip.size:
+            f["clip_sim_disliked_max"] = float(cosine_matrix(clips, disliked_clip).max())
         f["clip_margin"] = f["clip_sim_liked_max"] - f["clip_sim_disliked_max"]
-        f["clip_knn_liked_frac"] = self._knn_frac(clips, self.liked_clip, self.disliked_clip, k=7)
+        f["clip_knn_liked_frac"] = self._knn_frac(clips, liked_clip, disliked_clip)
 
         # zero-shot prompts
         pos, neg = self._prompt_vectors()
@@ -235,14 +297,20 @@ class FeatureExtractor:
         return f
 
     @staticmethod
-    def _knn_frac(q: np.ndarray, liked: np.ndarray, disliked: np.ndarray, k: int) -> float:
-        """Fraction of the k nearest reference vectors (pooled) that are liked. 0.5 when unknown."""
+    def _knn_frac(q: np.ndarray, liked: np.ndarray, disliked: np.ndarray, k: int | None = None) -> float:
+        """Fraction of the k nearest reference vectors (pooled) that are liked. 0.5 when unknown.
+
+        ``k`` defaults to about the square root of the pool size (7 for small pools, at most 25): a
+        fixed small k gets noisy once hundreds of labelled profiles are in the pool.
+        """
         if not q.size or not (liked.size or disliked.size):
             return 0.5
         pool = np.concatenate([x for x in (liked, disliked) if x.size])
         labels = np.concatenate([np.ones(liked.shape[0]) if liked.size else np.zeros(0),
                                  np.zeros(disliked.shape[0]) if disliked.size else np.zeros(0)])
         sims = cosine_matrix(q, pool).max(axis=0)  # best match per reference across the profile's vectors
+        if k is None:
+            k = max(7, min(25, int(math.sqrt(sims.size))))
         k = max(1, min(k, sims.size // 2))         # never vote with (almost) the whole pool
         idx = np.argsort(sims)[::-1][:k]
         return float(labels[idx].mean())

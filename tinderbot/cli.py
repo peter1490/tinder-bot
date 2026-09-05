@@ -108,7 +108,8 @@ def swipe(
     st = _storage(cfg)
     runner = Runner(cfg, st, Models(cfg), seed=seed)
     stats = runner.run_shadow(max_swipes) if shadow else runner.run_auto(max_swipes, once=not loop)
-    console.print(f"liked={stats.liked} noped={stats.noped} skipped={stats.skipped} captchas={stats.captchas}")
+    console.print(f"liked={stats.liked} (super={stats.super_liked}, notes={stats.notes}) noped={stats.noped} "
+                  f"skipped={stats.skipped} captchas={stats.captchas}")
 
 
 def _scheduler(cfg: Config, st, seed: int | None = None):
@@ -249,8 +250,9 @@ def score(
     prof = ProfileRecord(id="local_" + str(int(time.time())), name="local", age=age, bio=bio, photo_urls=[str(p) for p in paths])
     analysis = ex.analyse_profile(prof, paths, persist=False)
     feats = ex.features(analysis)
-    v = Scorer(cfg, st).decide(prof, feats)
-    t = Table(title=f"verdict: {'LIKE' if v.like else 'NOPE'}  p={v.score:.3f} (prior {v.prior:.3f})")
+    v = Scorer(cfg, st, extractor=ex).decide(prof, feats)
+    verdict = "SUPER CRUSH" if v.super_crush else "CRUSH" if v.crush else "LIKE" if v.like else "NOPE"
+    t = Table(title=f"verdict: {verdict}  p={v.score:.3f} (prior {v.prior:.3f})")
     t.add_column("feature")
     t.add_column("value", justify="right")
     for k, val in feats.items():
@@ -261,12 +263,17 @@ def score(
 
 @app.command()
 def retrain(config: str = _cfg_opt):
-    """Refit the learned likeness model from all labelled decisions."""
+    """Refit the learned likeness model from all labelled decisions (features are recomputed from the
+    stored embeddings against the current reference pools, leaving each profile's own vectors out)."""
+    from .likeness.features import FeatureExtractor
     from .likeness.scorer import Scorer
+    from .models.loader import Models
 
     cfg = _cfg(config)
     st = _storage(cfg)
-    n = Scorer(cfg, st).retrain()
+    ex = FeatureExtractor(cfg, Models(cfg), st)
+    n = Scorer(cfg, st, extractor=ex).retrain()
+    console.print(f"references: {ex.reference_summary()}")
     console.print(f"examples: {n} (learned model {'active' if n >= cfg.likeness.learning.min_examples else 'needs more labels'})")
 
 
@@ -305,6 +312,8 @@ def stats(config: str = _cfg_opt):
     t.add_row("decisions (total)", str(st.count_decisions()))
     t.add_row("decisions today (auto)", str(st.count_decisions(since_ts=day, source="auto")))
     t.add_row("likes / nopes", f"{st.count_decisions(action='like')} / {st.count_decisions(action='nope')}")
+    t.add_row("super likes (today)", f"{st.count_decisions(action='superlike')} ({st.count_events('superlike', day)})")
+    t.add_row("super like notes (today)", f"{st.count_events('crush_message', 0)} ({st.count_events('crush_message', day)})")
     t.add_row("manual labels", str(st.count_decisions(source="manual")))
     t.add_row("captchas today", str(st.count_events("captcha", day)))
     halt = st.get_meta("halt")
