@@ -209,7 +209,8 @@ class Storage:
                WHERE d.label IS NOT NULL AND d.features IS NOT NULL"""
         ).fetchall()
 
-    def count_decisions(self, since_ts: float | None = None, action: str | None = None, source: str | None = None) -> int:
+    def count_decisions(self, since_ts: float | None = None, action: str | None = None,
+                        source: str | Iterable[str] | None = None) -> int:
         q, args = "SELECT COUNT(*) FROM decisions WHERE 1=1", []
         if since_ts is not None:
             q += " AND ts>=?"
@@ -218,9 +219,32 @@ class Storage:
             q += " AND action=?"
             args.append(action)
         if source:
+            sources = [source] if isinstance(source, str) else list(source)
+            q += f" AND source IN ({','.join('?' * len(sources))})"
+            args.extend(sources)
+        return int(self.conn.execute(q, args).fetchone()[0])
+
+    def recent_actions(self, limit: int, source: str | None = "auto", since_ts: float | None = None) -> list[str]:
+        """Actions of the most recent decisions, newest first (for the like-ratio governor)."""
+        q, args = "SELECT action FROM decisions WHERE 1=1", []
+        if source:
             q += " AND source=?"
             args.append(source)
-        return int(self.conn.execute(q, args).fetchone()[0])
+        if since_ts is not None:
+            q += " AND ts>=?"
+            args.append(since_ts)
+        q += " ORDER BY id DESC LIMIT ?"
+        args.append(int(limit))
+        return [r[0] for r in self.conn.execute(q, args)]
+
+    def first_decision_ts(self, source: str | None = "auto") -> float | None:
+        """Timestamp of the first stored decision (used to ramp up a freshly automated account)."""
+        q, args = "SELECT MIN(ts) FROM decisions", []
+        if source:
+            q += " WHERE source=?"
+            args.append(source)
+        v = self.conn.execute(q, args).fetchone()[0]
+        return float(v) if v is not None else None
 
     def uncertain_for_review(self, limit: int = 50) -> list[sqlite3.Row]:
         return self.conn.execute(
@@ -385,6 +409,22 @@ class Storage:
 
     def count_events(self, kind: str, since_ts: float) -> int:
         return int(self.conn.execute("SELECT COUNT(*) FROM events WHERE kind=? AND ts>=?", (kind, since_ts)).fetchone()[0])
+
+    def last_event(self, kind: str) -> sqlite3.Row | None:
+        return self.conn.execute("SELECT * FROM events WHERE kind=? ORDER BY id DESC LIMIT 1", (kind,)).fetchone()
+
+    def recent_events(self, limit: int = 20, since_ts: float | None = None) -> list[sqlite3.Row]:
+        q, args = "SELECT * FROM events", []
+        if since_ts is not None:
+            q += " WHERE ts>=?"
+            args.append(since_ts)
+        q += " ORDER BY id DESC LIMIT ?"
+        args.append(int(limit))
+        return self.conn.execute(q, args).fetchall()
+
+    def delete_meta(self, key: str) -> None:
+        self.conn.execute("DELETE FROM meta WHERE key=?", (key,))
+        self.conn.commit()
 
     def set_meta(self, key: str, value: Any) -> None:
         self.conn.execute("INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)", (key, json.dumps(value)))

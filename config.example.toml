@@ -14,11 +14,11 @@ slow_mo_ms = 0
 
 [pacing]
 # Session/daily budgets (Tinder's own free-tier daily like cap is ~100; humans rarely exceed 200 swipes/day)
-swipes_per_session = [40, 90]         # random in range, each session
-sessions_per_day = 3
-max_swipes_per_day = 200
-break_between_sessions_min = [20, 75]  # minutes
-active_hours = [9, 23]                 # local hours; outside this the bot waits
+swipes_per_session = [15, 80]         # right-skewed random draw per session (most sessions are short)
+sessions_per_day = [1, 4]             # `tinderbot auto` draws a different count every day; `swipe --loop` uses the max
+max_swipes_per_day = 160              # hard cap; the unattended day target is this x day_budget_jitter x ramp
+break_between_sessions_min = [20, 75]  # minutes (only `swipe --loop`; `auto` places sessions by the clock)
+active_hours = [9, 23]                 # local hours; nothing happens outside this window
 # Per-profile "reading" time model (seconds). Actual time = base + per_photo*photos_browsed + per_char*bio_len
 base_seconds = [1.2, 4.5]
 per_photo_seconds = [0.8, 2.5]
@@ -30,10 +30,48 @@ p_open_profile = 0.15
 # Occasional short pauses (phone check, distraction)
 p_micro_break = 0.06
 micro_break_seconds = [15, 90]
+# Verdict-aware dwell: linger on profiles you like, flick past the ones you don't (multipliers)
+like_dwell_multiplier = [1.1, 1.8]
+nope_dwell_multiplier = [0.5, 1.0]
+# Per-session persona, drawn once per session: overall tempo and keyboard-vs-mouse preference
+session_tempo = [0.8, 1.35]
+keyboard_preference = [0.1, 0.8]
+session_warmup_seconds = [3, 12]      # orientation pause after the recs screen appears
+p_end_session_early = 0.01            # per swipe (after half the plan): quit early, "got bored"
+# Like-rate governor. Right-swiping everyone is the #1 reported cause of shadow-bans and challenges.
+# If the like share of the last `like_ratio_window` auto decisions would exceed max_like_ratio, the
+# weakest LIKE verdicts are swiped left instead (the training label still records the verdict).
+max_like_ratio = 0.55                 # 1.0 disables the governor
+like_ratio_window = 50
+like_ratio_min_samples = 12
+
+[schedule]
+# Day-level rhythm for `tinderbot auto` (fully unattended). Each day gets its own random plan,
+# persisted in the database so a restart keeps the same plan. The browser is closed between sessions.
+p_rest_day = 0.12                     # some days Tinder is simply not opened
+# Relative likelihood of a session starting in each hour (index 0 = midnight, 24 values). Hours outside
+# pacing.active_hours never get a session. Default: small morning bump, lunch bump, strong evening peak.
+hour_weights = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.3, 0.6, 0.8, 0.7, 0.7,
+                1.2, 1.1, 0.6, 0.6, 0.7, 0.9, 1.2, 1.5, 2.0, 2.2, 1.8, 0.9]
+weekend_multiplier = 1.15             # factor on the session count on Saturday/Sunday
+min_gap_minutes = 45                  # minimum idle time between the end of a session and the next one
+slot_grace_minutes = 40               # a slot the process wakes up later than this (laptop asleep) is skipped, not run late
+day_budget_jitter = [0.5, 1.0]        # day target = max_swipes_per_day x this
+ramp_days = 7                         # scale the budget from ramp_start to 1.0 over the first days of automation
+ramp_start = 0.4
+# Unattended safety. A challenge nobody solved cancels the rest of the day and pauses the bot for a
+# random number of hours; after max_unsolved_challenges in a row the bot halts until `tinderbot resume`.
+# Account notices (ban / review / logged out) and a lost login halt immediately.
+unsolved_challenge_pause_hours = [12, 24]
+max_unsolved_challenges = 2
+max_consecutive_errors = 3
+poll_seconds = 30
 
 [captcha]
-# When Tinder shows an Arkose "verify you're human" challenge the bot pauses and waits for YOU to solve it.
-wait_for_human_max_minutes = 30
+# When Tinder shows an Arkose "verify you're human" challenge the bot pauses and waits for YOU to solve it
+# (desktop notification + bell). In unattended mode nobody may be there: after this many minutes the
+# browser is closed and the schedule policy above takes over.
+wait_for_human_max_minutes = 10
 cooldown_after_captcha_minutes = [30, 90]
 # after this many challenges in one day the bot stops for the day
 max_captchas_per_day = 2

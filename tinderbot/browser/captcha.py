@@ -25,8 +25,10 @@ CAPTCHA_TEXT_HINTS = (
     "press and hold", "security check", "human verification",
 )
 ACCOUNT_TEXT_HINTS = (
-    "your account has been banned", "account under review", "we've noticed unusual activity",
-    "you've been logged out", "something went wrong. please try again later",
+    "your account has been banned", "account has been banned", "account under review",
+    "we've noticed unusual activity", "you've been logged out", "you have been logged out",
+    "something went wrong. please try again later", "violated our terms", "community guidelines",
+    "votre compte a été banni", "compte a été suspendu",
 )
 
 
@@ -82,8 +84,9 @@ class CaptchaPolicy:
         self.slowdown = 1.0  # multiplier applied to all pauses for the rest of the day
 
     def challenges_today(self) -> int:
-        midnight = time.time() - (time.time() % 86400)
-        return self.storage.count_events("captcha", midnight)
+        from .pacing import local_midnight_ts
+
+        return self.storage.count_events("captcha", local_midnight_ts())
 
     def handle(self, page, challenge: Challenge, sleep: Callable[[float], None] = time.sleep) -> str:
         """Block until the human solved the challenge (or timeout). Returns 'solved' | 'timeout' | 'stop'."""
@@ -95,16 +98,20 @@ class CaptchaPolicy:
         notify("tinderbot needs you", "Tinder is showing a human-verification challenge. Solve it in the browser window.", self.cfg)
         with contextlib.suppress(Exception):
             page.bring_to_front()
-        deadline = time.time() + self.cfg.wait_for_human_max_minutes * 60
+        started = time.time()
+        deadline = started + self.cfg.wait_for_human_max_minutes * 60
         while time.time() < deadline:
             sleep(3)
             if detect_challenge(page) is None:
-                self.storage.log_event("captcha_solved", {"after_s": int(deadline - time.time())})
+                self.storage.log_event("captcha_solved", {"after_s": int(time.time() - started)})
                 self.slowdown = min(3.0, self.slowdown * 1.6)
                 if n >= self.cfg.max_captchas_per_day:
                     notify("tinderbot stopping for today", f"{n} challenges today: reached max_captchas_per_day", self.cfg)
                     return "stop"
                 return "solved"
+        # Nobody solved it.  Leaving the challenge open and retrying later is the worst possible
+        # signal; the caller closes the browser and backs off for a long time instead.
+        self.storage.log_event("captcha_unsolved", {"kind": challenge.kind, "detail": challenge.detail})
         return "timeout"
 
     def cooldown_seconds(self) -> float:
